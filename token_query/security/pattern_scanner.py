@@ -7,6 +7,24 @@ import re
 from typing import List, Dict, Any, Optional
 
 
+def _is_in_string(line: str, keyword: str) -> bool:
+    """
+    检查关键词是否在字符串中（简单实现）
+    返回True如果关键词在引号对之间
+    """
+    keyword_idx = line.find(keyword)
+    if keyword_idx == -1:
+        return False
+    
+    before = line[:keyword_idx]
+    after = line[keyword_idx + len(keyword):]
+    
+    # 计算前面的引号数量
+    before_quotes = before.count('"') + before.count("'")
+    # 如果引号数量是奇数，说明在字符串中
+    return before_quotes % 2 == 1
+
+
 def scan_with_patterns(source_code: str) -> List[Dict[str, Any]]:
     """
     使用模式匹配扫描 Solidity 代码
@@ -89,7 +107,36 @@ def scan_with_patterns(source_code: str) -> List[Dict[str, Any]]:
     if mint_analysis:
         issues.append(mint_analysis)
     
-    return issues
+    # 过滤掉非安全问题：只保留真正的安全问题
+    filtered_issues = []
+    # 定义需要过滤掉的非安全问题标题关键词
+    non_security_keywords = [
+        '可能未初始化的变量',
+        '不安全的类型转换',
+        '未检查的外部调用返回值',
+        '外部调用返回值未检查',
+        '未限制的循环',
+        '重要操作可能缺少事件记录',
+        '可能缺少事件记录'
+    ]
+    
+    for issue in issues:
+        severity = issue.get('severity', '').upper()
+        title = issue.get('title', '')
+        
+        # 保留所有CRITICAL和HIGH级别的问题
+        if severity in ['CRITICAL', 'HIGH']:
+            filtered_issues.append(issue)
+        # 对于MEDIUM级别，只保留真正的安全问题
+        elif severity == 'MEDIUM':
+            # 排除非安全问题
+            if not any(keyword in title for keyword in non_security_keywords):
+                filtered_issues.append(issue)
+        # 保留mint分析（即使是INFO级别）
+        elif issue.get('title') == 'Mint功能分析':
+            filtered_issues.append(issue)
+    
+    return filtered_issues
 
 
 def _check_reentrancy(lines: List[str]) -> List[Dict[str, Any]]:
@@ -638,7 +685,7 @@ def _check_unused_return_value(lines: List[str]) -> List[Dict[str, Any]]:
 
 
 def _analyze_mint_functionality(lines: List[str]) -> Optional[Dict[str, Any]]:
-    """分析mint功能：形式、最大值限制、一次性vs运行态铸造"""
+    """分析mint功能：形式、最大值限制、一次性vs运行态铸造，并提取代码片段"""
     mint_info = {
         "has_mint": False,
         "mint_in_constructor": False,
@@ -647,13 +694,18 @@ def _analyze_mint_functionality(lines: List[str]) -> Optional[Dict[str, Any]]:
         "max_supply_value": None,
         "mint_function_line": None,
         "constructor_mint_line": None,
-        "mint_access_control": False
+        "mint_access_control": False,
+        "mint_code_snippet": None,
+        "constructor_mint_code_snippet": None,
+        "max_supply_code_snippet": None
     }
     
     in_constructor = False
     in_mint_function = False
     constructor_line = 0
     mint_function_line = 0
+    constructor_code_lines = []
+    mint_function_code_lines = []
     
     for i, line in enumerate(lines, 1):
         stripped = line.strip()
@@ -662,6 +714,7 @@ def _analyze_mint_functionality(lines: List[str]) -> Optional[Dict[str, Any]]:
         if re.search(r'constructor\s*\(', stripped):
             in_constructor = True
             constructor_line = i
+            constructor_code_lines = [line]
         
         # 检测mint函数
         if re.search(r'function\s+mint', stripped, re.IGNORECASE):
@@ -670,39 +723,511 @@ def _analyze_mint_functionality(lines: List[str]) -> Optional[Dict[str, Any]]:
             mint_function_line = i
             mint_info["mint_function_line"] = i
             in_mint_function = True
+            mint_function_code_lines = [line]
             
-            # 检查权限控制
-            if 'onlyOwner' in stripped or 'onlyRole' in stripped or 'modifier' in stripped:
-                mint_info["mint_access_control"] = True
+            # 智能检测权限控制 - 不仅基于关键词，还分析函数签名和上下文
+            # 1. 检查函数签名中的修饰符（排除注释和字符串）
+            function_signature = stripped
+            # 移除注释
+            if '//' in function_signature:
+                function_signature = function_signature[:function_signature.index('//')]
+            # 检查是否有修饰符（在函数名和参数之间，或参数和{之间）
+            modifier_match = re.search(r'function\s+mint[^{]*?\)\s*([a-zA-Z_][a-zA-Z0-9_]*\s+)*([a-zA-Z_][a-zA-Z0-9_]*)\s*{', function_signature, re.IGNORECASE)
+            if modifier_match:
+                # 提取修饰符部分
+                modifiers_part = function_signature[modifier_match.end(1):modifier_match.end(2)]
+                # 检查常见的权限修饰符
+                access_control_patterns = [
+                    'onlyOwner', 'onlyRole', 'onlyMinter', 'onlyAdmin', 
+                    'onlyOperator', 'onlyController', 'onlyManager', 'onlyGovernor',
+                    'onlyWhitelist', 'onlyWhitelisted', 'onlyAuthorized', 'onlyAuthorizedRole',
+                    'hasRole', 'hasAccess', 'checkRole', 'requireRole',
+                    'onlyFactory', 'onlyBridge', 'onlyLiquidityProvider', 'onlyTreasury',
+                    'onlyPauser', 'onlyUnpauser', 'onlyMinterRole', 'onlyBurner',
+                    'onlyUpgrader', 'onlyProxyAdmin', 'onlyTimelock', 'onlyMultisig',
+                    'whenNotPaused', 'whenPaused'
+                ]
+                detected_modifiers = [p for p in access_control_patterns if p in modifiers_part]
+                if detected_modifiers:
+                    mint_info["mint_access_control"] = True
+                    mint_info["detected_access_modifiers"] = detected_modifiers
+            else:
+                # 2. 如果没有在函数签名中找到，检查函数名后的修饰符（可能跨行）
+                # 向前查找几行，看是否有修饰符
+                for check_line_idx in range(max(0, i - 3), i + 1):
+                    check_line = lines[check_line_idx].strip()
+                    # 移除注释
+                    if '//' in check_line:
+                        check_line = check_line[:check_line.index('//')]
+                    # 检查是否包含权限修饰符关键词（但不在字符串中）
+                    access_control_patterns = [
+                        'onlyOwner', 'onlyRole', 'onlyMinter', 'onlyAdmin', 
+                        'onlyOperator', 'onlyController', 'onlyManager', 'onlyGovernor',
+                        'onlyWhitelist', 'onlyWhitelisted', 'onlyAuthorized', 'onlyAuthorizedRole',
+                        'hasRole', 'hasAccess', 'checkRole', 'requireRole',
+                        'onlyFactory', 'onlyBridge', 'onlyLiquidityProvider', 'onlyTreasury',
+                        'onlyPauser', 'onlyUnpauser', 'onlyMinterRole', 'onlyBurner',
+                        'onlyUpgrader', 'onlyProxyAdmin', 'onlyTimelock', 'onlyMultisig',
+                        'whenNotPaused', 'whenPaused'
+                    ]
+                    # 检查是否在字符串中（简单检查：是否在引号中）
+                    in_string = False
+                    quote_count = check_line.count('"') + check_line.count("'")
+                    if quote_count > 0:
+                        # 简单检查：如果关键词在引号对之间，可能是在字符串中
+                        for pattern in access_control_patterns:
+                            pattern_idx = check_line.find(pattern)
+                            if pattern_idx != -1:
+                                # 检查前后是否有引号
+                                before = check_line[:pattern_idx]
+                                after = check_line[pattern_idx + len(pattern):]
+                                before_quotes = before.count('"') + before.count("'")
+                                after_quotes = after.count('"') + after.count("'")
+                                # 如果引号数量是奇数，说明在字符串中
+                                if before_quotes % 2 == 1 or after_quotes % 2 == 1:
+                                    continue
+                                # 如果不在注释中
+                                if '//' not in check_line[:pattern_idx] or check_line.index('//') > pattern_idx:
+                                    detected_modifiers = [pattern]
+                                    mint_info["mint_access_control"] = True
+                                    mint_info["detected_access_modifiers"] = detected_modifiers
+                                    break
+                    else:
+                        # 没有引号，直接检查
+                        detected_modifiers = [p for p in access_control_patterns if p in check_line and '//' not in check_line[:check_line.index(p)]]
+                        if detected_modifiers:
+                            mint_info["mint_access_control"] = True
+                            mint_info["detected_access_modifiers"] = detected_modifiers
+                            break
         
-        # 在构造函数中查找mint调用
+        # 在构造函数中查找mint调用和maxSupply赋值
         if in_constructor:
+            constructor_code_lines.append(line)
             if 'mint(' in stripped or '_mint(' in stripped:
                 mint_info["has_mint"] = True
                 mint_info["mint_in_constructor"] = True
                 mint_info["constructor_mint_line"] = i
+            # 查找构造函数中对maxSupply的赋值
+            if mint_info.get("need_find_constructor_assign") and mint_info.get("max_supply_var_name"):
+                var_name = mint_info["max_supply_var_name"]
+                if var_name in stripped and '=' in stripped:
+                    assign_match = re.search(r'=\s*([0-9_]+(?:e[0-9]+)?)', stripped)
+                    if assign_match:
+                        value_str = assign_match.group(1).replace('_', '')
+                        if value_str != '0' and not value_str.startswith('0e'):
+                            mint_info["max_supply_value"] = value_str
+                            mint_info["need_find_constructor_assign"] = False
             if stripped == '}' or (stripped.endswith('}') and '{' not in stripped):
                 in_constructor = False
+                if mint_info["mint_in_constructor"]:
+                    # 提取构造函数中的mint相关代码（前后各5行）
+                    start = max(0, constructor_line - 1)
+                    end = min(len(lines), i + 1)
+                    mint_info["constructor_mint_code_snippet"] = '\n'.join(lines[start:end])
         
-        # 在mint函数中查找权限控制
+        # 在mint函数中智能查找权限控制
         if in_mint_function:
-            if 'onlyOwner' in stripped or 'onlyRole' in stripped or 'require(' in stripped:
-                if 'msg.sender' in stripped or 'owner' in stripped.lower():
-                    mint_info["mint_access_control"] = True
+            mint_function_code_lines.append(line)
+            
+            # 智能权限检测：不仅检查关键词，还分析语义
+            if not mint_info.get("mint_access_control") or not mint_info.get("checked_permission_semantically"):
+                # 1. 检查函数体中的require语句（权限检查）
+                if 'require(' in stripped:
+                    # 移除注释
+                    require_line = stripped
+                    if '//' in require_line:
+                        require_line = require_line[:require_line.index('//')]
+                    
+                    # 检查require中的权限相关逻辑（使用正则表达式匹配语义模式）
+                    permission_patterns = [
+                        r'msg\.sender\s*==\s*\w*owner',  # msg.sender == owner
+                        r'owner\s*==\s*msg\.sender',      # owner == msg.sender
+                        r'hasRole\s*\([^)]*msg\.sender',  # hasRole(..., msg.sender)
+                        r'roles\s*\[\s*msg\.sender',      # roles[msg.sender]
+                        r'isOwner\s*\([^)]*msg\.sender',  # isOwner(msg.sender)
+                        r'isAuthorized\s*\([^)]*msg\.sender',  # isAuthorized(msg.sender)
+                        r'isMinter\s*\([^)]*msg\.sender',  # isMinter(msg.sender)
+                        r'minter\s*==\s*msg\.sender',     # minter == msg.sender
+                        r'msg\.sender\s*==\s*\w*minter',  # msg.sender == minter
+                        r'admin\s*==\s*msg\.sender',      # admin == msg.sender
+                        r'msg\.sender\s*==\s*\w*admin',   # msg.sender == admin
+                    ]
+                    
+                    for pattern in permission_patterns:
+                        if re.search(pattern, require_line, re.IGNORECASE):
+                            # 检查是否在字符串中
+                            if not _is_in_string(require_line, pattern[:10]):  # 使用模式的前10个字符作为关键词
+                                mint_info["mint_access_control"] = True
+                                if not mint_info.get("detected_access_modifiers"):
+                                    mint_info["detected_access_modifiers"] = []
+                                mint_info["detected_access_modifiers"].append("require_permission_check")
+                                mint_info["checked_permission_semantically"] = True
+                                break
+                    
+                    # 检查require中的权限关键词（但排除在字符串中的）
+                    if not mint_info.get("mint_access_control"):
+                        permission_keywords = [
+                            'owner', 'minter', 'admin', 'operator', 
+                            'controller', 'role', 'authorized', 'whitelist', 
+                            'access', 'permission', 'allowed', 'approved'
+                        ]
+                        for keyword in permission_keywords:
+                            if keyword in require_line.lower() and not _is_in_string(require_line, keyword):
+                                mint_info["mint_access_control"] = True
+                                if not mint_info.get("detected_access_modifiers"):
+                                    mint_info["detected_access_modifiers"] = []
+                                mint_info["detected_access_modifiers"].append(f"require_{keyword}_check")
+                                mint_info["checked_permission_semantically"] = True
+                                break
+                
+                # 2. 检查if语句中的权限检查
+                elif re.search(r'if\s*\([^)]*(?:msg\.sender|owner|minter|admin|role|authorized)', stripped, re.IGNORECASE):
+                    # 移除注释
+                    if_line = stripped
+                    if '//' in if_line:
+                        if_line = if_line[:if_line.index('//')]
+                    # 检查是否在字符串中
+                    if not _is_in_string(if_line, 'msg.sender'):
+                        mint_info["mint_access_control"] = True
+                        if not mint_info.get("detected_access_modifiers"):
+                            mint_info["detected_access_modifiers"] = []
+                        mint_info["detected_access_modifiers"].append("if_permission_check")
+                        mint_info["checked_permission_semantically"] = True
+                
+                # 3. 检查修饰符调用（如 modifier onlyOwner() { ... }）
+                elif re.search(r'(?:modifier|function)\s+\w*only\w*', stripped, re.IGNORECASE):
+                    if not _is_in_string(stripped, 'modifier'):
+                        modifier_match = re.search(r'(?:modifier|function)\s+(\w*only\w*)', stripped, re.IGNORECASE)
+                        if modifier_match:
+                            modifier_name = modifier_match.group(1)
+                            mint_info["mint_access_control"] = True
+                            if not mint_info.get("detected_access_modifiers"):
+                                mint_info["detected_access_modifiers"] = []
+                            mint_info["detected_access_modifiers"].append(modifier_name)
+                            mint_info["checked_permission_semantically"] = True
+                
+                # 4. 检查函数签名中的修饰符（如果之前没检测到）
+                if not mint_info.get("mint_access_control"):
+                    access_control_patterns = [
+                        'onlyOwner', 'onlyRole', 'onlyMinter', 'onlyAdmin',
+                        'onlyOperator', 'onlyController', 'onlyManager', 'onlyGovernor',
+                        'onlyWhitelist', 'onlyWhitelisted', 'onlyAuthorized', 'onlyAuthorizedRole',
+                        'hasRole', 'hasAccess', 'checkRole', 'requireRole',
+                        'onlyFactory', 'onlyBridge', 'onlyLiquidityProvider', 'onlyTreasury',
+                        'onlyPauser', 'onlyUnpauser', 'onlyMinterRole', 'onlyBurner',
+                        'onlyUpgrader', 'onlyProxyAdmin', 'onlyTimelock', 'onlyMultisig',
+                        'whenNotPaused', 'whenPaused'
+                    ]
+                    for pattern in access_control_patterns:
+                        if pattern in stripped and not _is_in_string(stripped, pattern):
+                            mint_info["mint_access_control"] = True
+                            if not mint_info.get("detected_access_modifiers"):
+                                mint_info["detected_access_modifiers"] = []
+                            mint_info["detected_access_modifiers"].append(pattern)
+                            break
+                
+                # 5. 检查函数体开始后是否有权限检查（如果函数签名中没有）
+                if '{' in stripped and not mint_info.get("mint_access_control") and not mint_info.get("checked_permission_in_body"):
+                    mint_info["checked_permission_in_body"] = True
+                    # 检查函数签名（可能跨多行）
+                    for check_i in range(max(0, mint_function_line - 1), i + 1):
+                        check_line = lines[check_i].strip()
+                        # 移除注释
+                        if '//' in check_line:
+                            check_line = check_line[:check_line.index('//')]
+                        # 检查修饰符（不在字符串中）
+                        access_control_patterns = [
+                            'onlyOwner', 'onlyRole', 'onlyMinter', 'onlyAdmin',
+                            'onlyOperator', 'onlyController', 'onlyManager', 'onlyGovernor',
+                            'onlyWhitelist', 'onlyWhitelisted', 'onlyAuthorized', 'onlyAuthorizedRole',
+                            'hasRole', 'hasAccess', 'checkRole', 'requireRole',
+                            'onlyFactory', 'onlyBridge', 'onlyLiquidityProvider', 'onlyTreasury',
+                            'onlyPauser', 'onlyUnpauser', 'onlyMinterRole', 'onlyBurner',
+                            'onlyUpgrader', 'onlyProxyAdmin', 'onlyTimelock', 'onlyMultisig',
+                            'whenNotPaused', 'whenPaused'
+                        ]
+                        for pattern in access_control_patterns:
+                            if pattern in check_line and not _is_in_string(check_line, pattern):
+                                mint_info["mint_access_control"] = True
+                                if not mint_info.get("detected_access_modifiers"):
+                                    mint_info["detected_access_modifiers"] = []
+                                mint_info["detected_access_modifiers"].append(pattern)
+                                break
+                        if mint_info.get("mint_access_control"):
+                            break
             if stripped == '}' or (stripped.endswith('}') and '{' not in stripped):
                 in_mint_function = False
+                # 提取mint函数代码（前后各5行）
+                start = max(0, mint_function_line - 1)
+                end = min(len(lines), i + 1)
+                mint_info["mint_code_snippet"] = '\n'.join(lines[start:end])
         
         # 查找最大供应量限制
         if re.search(r'(maxSupply|max_supply|MAX_SUPPLY|cap|CAP)', stripped, re.IGNORECASE):
             mint_info["has_max_supply"] = True
-            # 尝试提取数值
-            num_match = re.search(r'(\d+)', stripped)
-            if num_match:
-                mint_info["max_supply_value"] = num_match.group(1)
+            # 尝试提取数值 - 改进逻辑，避免提取条件判断中的0
+            # 优先查找赋值语句：maxSupply = 1000000; 或 uint256 maxSupply = 1000000;
+            assignment_match = re.search(r'(?:maxSupply|max_supply|MAX_SUPPLY|cap|CAP)\s*=\s*([0-9_]+(?:e[0-9]+)?)', stripped, re.IGNORECASE)
+            if assignment_match:
+                value_str = assignment_match.group(1).replace('_', '')
+                # 排除0值（可能是初始化或条件判断）
+                if value_str != '0' and not value_str.startswith('0e'):
+                    mint_info["max_supply_value"] = value_str
+            else:
+                # 查找常量定义：uint256 constant MAX_SUPPLY = 1000000;
+                constant_match = re.search(r'(?:constant|immutable)\s+(?:maxSupply|max_supply|MAX_SUPPLY|cap|CAP)\s*=\s*([0-9_]+(?:e[0-9]+)?)', stripped, re.IGNORECASE)
+                if constant_match:
+                    value_str = constant_match.group(1).replace('_', '')
+                    if value_str != '0' and not value_str.startswith('0e'):
+                        mint_info["max_supply_value"] = value_str
+                else:
+                    # 查找变量声明：uint256 public maxSupply = 1000000;
+                    declaration_match = re.search(r'(?:uint256|uint|uint128|uint64)\s+(?:public\s+)?(?:maxSupply|max_supply|MAX_SUPPLY|cap|CAP)\s*=\s*([0-9_]+(?:e[0-9]+)?)', stripped, re.IGNORECASE)
+                    if declaration_match:
+                        value_str = declaration_match.group(1).replace('_', '')
+                        if value_str != '0' and not value_str.startswith('0e'):
+                            mint_info["max_supply_value"] = value_str
+                    else:
+                        # 最后尝试：查找非0的数字（排除条件判断中的0和类型名中的256）
+                        # 避免匹配 if (maxSupply > 0) 中的0 和 uint256 中的256
+                        if '>' not in stripped and '<' not in stripped and '==' not in stripped and '!=' not in stripped:
+                            # 排除类型声明行（如 uint256 i_maxSupply; 或 uint256 amount）
+                            # 只有当行中包含maxSupply/cap等关键词且不是类型声明时才提取数字
+                            if re.search(r'(?:maxSupply|max_supply|MAX_SUPPLY|cap|CAP)', stripped, re.IGNORECASE):
+                                # 检查是否是类型声明（如 uint256 i_maxSupply;）
+                                if not re.search(r'uint\d*\s+(?:i_|_)?(?:maxSupply|max_supply|MAX_SUPPLY|cap|CAP)\s*;', stripped, re.IGNORECASE):
+                                    num_match = re.search(r'([1-9][0-9_]*(?:e[0-9]+)?)', stripped)
+                                    if num_match:
+                                        value_str = num_match.group(1).replace('_', '')
+                                        # 排除256（可能是uint256类型名的一部分）
+                                        if value_str != '256':
+                                            mint_info["max_supply_value"] = value_str
+            # 提取最大供应量相关代码（前后各3行）
+            start = max(0, i - 4)
+            end = min(len(lines), i + 3)
+            mint_info["max_supply_code_snippet"] = '\n'.join(lines[start:end])
         
-        # 查找totalSupply检查
-        if 'totalSupply' in stripped and ('<=' in stripped or '<' in stripped or 'require' in stripped):
+        # 查找totalSupply检查（如 totalSupply <= maxSupply 或 totalSupply < cap）
+        if 'totalSupply' in stripped and ('<=' in stripped or '<' in stripped or 'require' in stripped or '>' in stripped):
             mint_info["has_max_supply"] = True
+            # 尝试从比较表达式中提取最大值
+            # 例如：require(totalSupply <= maxSupply, "...") 或 if (totalSupply < cap)
+            if not mint_info["max_supply_value"] and not mint_info.get("max_supply_from_param"):
+                # 查找 totalSupply <= 数字 或 totalSupply < 数字
+                comparison_match = re.search(r'totalSupply\s*(?:\+|\-)?\s*\w*\s*(?:<|<=)\s*([0-9_]+(?:e[0-9]+)?)', stripped, re.IGNORECASE)
+                if comparison_match:
+                    value_str = comparison_match.group(1).replace('_', '')
+                    if value_str != '0' and not value_str.startswith('0e'):
+                        mint_info["max_supply_value"] = value_str
+                else:
+                    # 查找 totalSupply + amount <= 变量名 或 totalSupply < 变量名
+                    # 例如：totalSupply() + amount > i_maxSupply
+                    var_match = re.search(r'totalSupply[^>]*>\s*([a-zA-Z_][a-zA-Z0-9_]*)', stripped, re.IGNORECASE)
+                    if not var_match:
+                        var_match = re.search(r'totalSupply[^<]*<\s*([a-zA-Z_][a-zA-Z0-9_]*)', stripped, re.IGNORECASE)
+                    if not var_match:
+                        var_match = re.search(r'totalSupply[^=]*<=\s*([a-zA-Z_][a-zA-Z0-9_]*)', stripped, re.IGNORECASE)
+                    if var_match:
+                        var_name = var_match.group(1)
+                        # 向前查找变量定义（最多向前查找200行，因为可能在文件开头）
+                        for j in range(max(0, i - 200), i):
+                            prev_line = lines[j].strip()
+                            # 优先查找变量赋值：i_maxSupply = maxSupply_; 或 i_maxSupply = 1000000;
+                            if var_name in prev_line and '=' in prev_line:
+                                # 查找赋值语句：var_name = value;
+                                assign_match = re.search(re.escape(var_name) + r'\s*=\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*;', prev_line)
+                                if assign_match:
+                                    # 如果赋值给另一个变量（如 i_maxSupply = maxSupply_;），查找那个变量的值
+                                    assigned_var = assign_match.group(1)
+                                    # 向前查找assigned_var的定义或参数（最多向前查找200行）
+                                    found_param = False
+                                    for l in range(max(0, j - 200), j):
+                                        param_line = lines[l].strip()
+                                        # 查找函数参数：function initialize(uint256 maxSupply_) 或 function initialize(...uint256 maxSupply_...)
+                                        # 支持多行参数定义
+                                        if assigned_var in param_line:
+                                            # 检查是否是参数类型定义（如 uint256 maxSupply_）
+                                            param_type_match = re.search(r'(?:uint256|uint|uint128|uint64)\s+' + re.escape(assigned_var), param_line, re.IGNORECASE)
+                                            if param_type_match:
+                                                # 检查是否在函数定义中（向前查找函数定义，最多15行，支持多行参数）
+                                                for m in range(max(0, l - 15), l + 1):
+                                                    func_line = lines[m].strip()
+                                                    # 检查是否是函数定义，并且参数行在函数参数列表中
+                                                    if 'function' in func_line.lower():
+                                                        # 检查参数行是否在函数参数范围内（函数定义行到参数行之间应该有(或)
+                                                        has_open_paren = False
+                                                        for n in range(m, l + 1):
+                                                            if '(' in lines[n]:
+                                                                has_open_paren = True
+                                                            if ')' in lines[n] and n < l:
+                                                                break
+                                                        if has_open_paren:
+                                                            # 这是函数参数，无法从代码中直接获取值，需要运行时数据
+                                                            mint_info["max_supply_from_param"] = True
+                                                            found_param = True
+                                                            break
+                                                    elif 'constructor' in func_line.lower():
+                                                        # 构造函数参数
+                                                        has_open_paren = False
+                                                        for n in range(m, l + 1):
+                                                            if '(' in lines[n]:
+                                                                has_open_paren = True
+                                                            if ')' in lines[n] and n < l:
+                                                                break
+                                                        if has_open_paren:
+                                                            mint_info["max_supply_from_param"] = True
+                                                            found_param = True
+                                                            break
+                                                if found_param:
+                                                    break
+                                    if found_param:
+                                        break
+                                else:
+                                    # 直接赋值数字：i_maxSupply = 1000000;
+                                    direct_assign_match = re.search(re.escape(var_name) + r'\s*=\s*([0-9_]+(?:e[0-9]+)?)', prev_line)
+                                    if direct_assign_match:
+                                        value_str = direct_assign_match.group(1).replace('_', '')
+                                        if value_str != '0' and value_str != '256' and not value_str.startswith('0e'):
+                                            mint_info["max_supply_value"] = value_str
+                                            break
+                            # 查找变量声明：uint256 i_maxSupply; 或 uint256 internal i_maxSupply;
+                            elif var_name in prev_line:
+                                # 查找immutable变量声明：uint256 immutable i_maxSupply;
+                                immutable_match = re.search(r'(?:uint256|uint)\s+immutable\s+' + re.escape(var_name), prev_line, re.IGNORECASE)
+                                if immutable_match:
+                                    # immutable变量通常在构造函数或初始化函数中赋值
+                                    # 查找构造函数或初始化函数
+                                    for k in range(j, min(len(lines), j + 100)):
+                                        func_line = lines[k].strip()
+                                        if 'constructor' in func_line or 'initialize' in func_line.lower():
+                                            # 查找函数体中的赋值
+                                            for m in range(k, min(len(lines), k + 50)):
+                                                assign_line = lines[m].strip()
+                                                if var_name in assign_line and '=' in assign_line:
+                                                    # 检查是否是赋值给变量
+                                                    assign_to_var_match = re.search(re.escape(var_name) + r'\s*=\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*;', assign_line)
+                                                    if assign_to_var_match:
+                                                        assigned_var = assign_to_var_match.group(1)
+                                                        # 检查assigned_var是否是函数参数
+                                                        for n in range(max(0, k - 20), k + 20):
+                                                            param_line = lines[n].strip()
+                                                            if assigned_var in param_line:
+                                                                param_type_match = re.search(r'(?:uint256|uint|uint128|uint64)\s+' + re.escape(assigned_var), param_line, re.IGNORECASE)
+                                                                if param_type_match:
+                                                                    mint_info["max_supply_from_param"] = True
+                                                                    break
+                                                        if mint_info.get("max_supply_from_param"):
+                                                            break
+                                                    else:
+                                                        assign_value_match = re.search(r'=\s*([0-9_]+(?:e[0-9]+)?)', assign_line)
+                                                        if assign_value_match:
+                                                            value_str = assign_value_match.group(1).replace('_', '')
+                                                            if value_str != '0' and value_str != '256' and not value_str.startswith('0e'):
+                                                                mint_info["max_supply_value"] = value_str
+                                                                break
+                                            if mint_info.get("max_supply_value") or mint_info.get("max_supply_from_param"):
+                                                break
+                                    if mint_info.get("max_supply_value") or mint_info.get("max_supply_from_param"):
+                                        break
+                                # 查找构造函数或函数参数：constructor(uint256 _maxSupply) 或 function initialize(uint256 maxSupply_)
+                                param_match = re.search(r'(?:constructor|function)\s+\w*\s*\([^)]*' + re.escape(var_name) + r'[^)]*\)', prev_line, re.IGNORECASE)
+                                if not param_match:
+                                    # 也查找参数名（如 maxSupply_）
+                                    param_match = re.search(r'(?:constructor|function)\s+\w*\s*\([^)]*(?:uint256|uint)\s+([a-zA-Z_][a-zA-Z0-9_]*)[^)]*\)', prev_line, re.IGNORECASE)
+                                    if param_match:
+                                        param_name = param_match.group(1)
+                                        # 检查这个参数是否被赋值给我们的变量
+                                        for k in range(j, min(len(lines), j + 50)):
+                                            assign_line = lines[k].strip()
+                                            if var_name in assign_line and param_name in assign_line and '=' in assign_line:
+                                                # 这是函数参数，无法从代码中直接获取值
+                                                mint_info["max_supply_from_param"] = True
+                                                break
+                                    else:
+                                        # 查找构造函数体中的赋值
+                                        for k in range(j, min(len(lines), j + 50)):
+                                            assign_line = lines[k].strip()
+                                            if var_name in assign_line and '=' in assign_line:
+                                                assign_value_match = re.search(r'=\s*([0-9_]+(?:e[0-9]+)?)', assign_line)
+                                                if assign_value_match:
+                                                    value_str = assign_value_match.group(1).replace('_', '')
+                                                    if value_str != '0' and not value_str.startswith('0e'):
+                                                        mint_info["max_supply_value"] = value_str
+                                                        break
+                                    if mint_info.get("max_supply_value") or mint_info.get("max_supply_from_param"):
+                                        break
+            if not mint_info["max_supply_code_snippet"]:
+                # 提取totalSupply检查代码（前后各3行）
+                start = max(0, i - 4)
+                end = min(len(lines), i + 3)
+                mint_info["max_supply_code_snippet"] = '\n'.join(lines[start:end])
+    
+    # 智能分析：检查是否有继承关系（可能mint在父合约中）
+    has_inheritance = False
+    parent_contracts = []
+    contract_name = None
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        # 移除注释
+        if '//' in stripped:
+            stripped = stripped[:stripped.index('//')]
+        # 检测继承关系: contract X is Y, Z
+        if 'contract ' in stripped and ' is ' in stripped:
+            has_inheritance = True
+            # 提取合约名和父合约名
+            match = re.search(r'contract\s+(\w+)\s+is\s+([^{]+)', stripped)
+            if match:
+                contract_name = match.group(1)
+                parents = match.group(2).split(',')
+                parent_contracts = [p.strip() for p in parents if p.strip()]
+                break
+    
+    # 智能分析：如果mint函数没有直接权限控制，检查是否从父合约继承
+    if mint_info["mint_function_exists"] and not mint_info.get("mint_access_control") and has_inheritance:
+        # 检查父合约是否可能提供权限控制
+        # 常见的提供权限控制的父合约
+        access_control_parents = [
+            'Ownable', 'AccessControl', 'Roles', 'AccessControlEnumerable',
+            'MinterRole', 'Pausable', 'ReentrancyGuard'
+        ]
+        if any(parent in ' '.join(parent_contracts) for parent in access_control_parents):
+            # 可能从父合约继承了权限控制，但需要进一步确认
+            # 检查mint函数是否override了父合约的函数
+            mint_function_line = mint_info.get("mint_function_line", 0)
+            if mint_function_line > 0:
+                for check_i in range(max(0, mint_function_line - 1), min(len(lines), mint_function_line + 3)):
+                    check_line = lines[check_i].strip()
+                    if 'override' in check_line.lower() and 'mint' in check_line.lower():
+                        # 如果override了父合约的mint，可能继承了权限控制
+                        mint_info["mint_access_control"] = True
+                        mint_info["detected_access_modifiers"] = ["inherited_from_parent"]
+                        mint_info["inherited_access_control"] = True
+                        break
+    
+    # 如果没有检测到mint，但有关键的继承（如ERC20、OFT等），说明mint可能在父合约中
+    if not mint_info["has_mint"] and has_inheritance:
+        # 检查是否是常见的代币合约继承
+        token_keywords = ['ERC20', 'ERC721', 'ERC1155', 'OFT', 'Token', 'Coin', 'StandardToken']
+        if any(keyword in ' '.join(parent_contracts) for keyword in token_keywords):
+            return {
+                "severity": "INFO",
+                "title": "Mint功能分析",
+                "description": f"本合约未定义mint函数，但继承了 {', '.join(parent_contracts)}\n铸造形式: 可能在父合约中实现\n最大值限制: 需查看父合约代码\n权限控制: 需查看父合约代码",
+                "line": 0,
+                "mint_analysis": {
+                    "mint_type": "可能在父合约中实现",
+                    "max_supply": "需查看父合约代码",
+                    "access_control": "需查看父合约代码",
+                    "has_max_supply": False,
+                    "mint_in_constructor": False,
+                    "mint_function_exists": False,
+                    "inherited_from": parent_contracts,
+                    "mint_code_snippet": None,
+                    "constructor_mint_code_snippet": None,
+                    "max_supply_code_snippet": None
+                },
+                "recommendation": "mint功能可能在父合约中实现，建议查看父合约代码"
+            }
     
     if not mint_info["has_mint"]:
         return None
@@ -716,14 +1241,75 @@ def _analyze_mint_functionality(lines: List[str]) -> Optional[Dict[str, Any]]:
     elif mint_info["mint_function_exists"]:
         mint_type = "运行态可铸造"
     
+    # 智能权限控制评估：
+    # 1. 如果mint只在构造函数中，且合约继承了权限控制合约（如Ownable），这是安全的
+    #    构造函数只能被调用一次，且继承Ownable说明有权限控制机制
+    # 2. 只有当存在运行时的mint函数且没有权限控制时，才应该报告"缺少权限控制"
+    if mint_info["mint_in_constructor"] and not mint_info["mint_function_exists"]:
+        # 仅构造函数中的mint，检查是否继承了权限控制合约
+        if has_inheritance:
+            access_control_parents = [
+                'Ownable', 'AccessControl', 'Roles', 'AccessControlEnumerable',
+                'MinterRole', 'Pausable', 'ReentrancyGuard'
+            ]
+            if any(parent in ' '.join(parent_contracts) for parent in access_control_parents):
+                # 继承了权限控制合约，构造函数中的mint是安全的
+                mint_info["mint_access_control"] = True
+                if not mint_info.get("detected_access_modifiers"):
+                    mint_info["detected_access_modifiers"] = []
+                mint_info["detected_access_modifiers"].append("constructor_with_access_control_inheritance")
+                mint_info["constructor_safe"] = True
+    
     max_supply_info = "无限制"
     if mint_info["has_max_supply"]:
-        if mint_info["max_supply_value"]:
-            max_supply_info = f"有最大值限制: {mint_info['max_supply_value']}"
+        if mint_info.get("max_supply_from_param"):
+            max_supply_info = "有最大值限制（通过函数参数传入，部署/初始化时可指定具体值）"
+        elif mint_info["max_supply_value"]:
+            # 如果提取到的值是256，可能是误提取（比如uint256类型），需要进一步验证
+            if mint_info["max_supply_value"] == "256":
+                # 检查是否真的是maxSupply的值，还是只是类型uint256
+                code_snippet = mint_info.get("max_supply_code_snippet", "")
+                if code_snippet and "uint256" in code_snippet and "=" not in code_snippet:
+                    max_supply_info = "有最大值限制（具体值需查看代码，可能在父合约或初始化函数中）"
+                else:
+                    max_supply_info = f"有最大值限制: {mint_info['max_supply_value']}"
+            else:
+                max_supply_info = f"有最大值限制: {mint_info['max_supply_value']}"
         else:
-            max_supply_info = "有最大值限制（具体值需查看代码）"
+            max_supply_info = "有最大值限制（具体值需查看代码，可能在父合约或初始化函数中）"
     
-    access_control_info = "有权限控制" if mint_info["mint_access_control"] else "缺少权限控制"
+    # 评估权限控制的充分性
+    if mint_info["mint_access_control"]:
+        detected_modifiers = mint_info.get("detected_access_modifiers", [])
+        if detected_modifiers:
+            # 检查权限控制是否足够严格
+            # 过于宽松的权限控制（如public、external without modifier）
+            weak_patterns = ['public', 'external', 'internal', 'private']
+            is_weak = any(pattern in ' '.join(detected_modifiers).lower() for pattern in weak_patterns)
+            
+            # 检查是否有合适的权限修饰符
+            strong_patterns = [
+                'onlyOwner', 'onlyRole', 'onlyMinter', 'onlyAdmin',
+                'onlyOperator', 'onlyController', 'hasRole', 'requireRole'
+            ]
+            has_strong_control = any(pattern in detected_modifiers for pattern in strong_patterns)
+            
+            if is_weak and not has_strong_control:
+                access_control_info = f"权限控制不足（检测到: {', '.join(set(detected_modifiers))}）"
+            else:
+                # 如果是构造函数继承的权限控制，显示更友好的信息
+                if "constructor_with_access_control_inheritance" in detected_modifiers:
+                    access_control_info = "有权限控制（构造函数中mint，继承权限控制合约）"
+                else:
+                    access_control_info = f"有权限控制（{', '.join(set(detected_modifiers))}）"
+        else:
+            access_control_info = "有权限控制（未识别具体修饰符）"
+    else:
+        # 如果mint只在构造函数中，即使没有检测到权限控制，也不应该显示"缺少权限控制"
+        if mint_info["mint_in_constructor"] and not mint_info["mint_function_exists"]:
+            access_control_info = "构造函数中mint（相对安全，构造函数只能调用一次）"
+        else:
+            access_control_info = "缺少权限控制（高风险）"
     
     description = f"铸造形式: {mint_type}\n"
     description += f"最大值限制: {max_supply_info}\n"
@@ -736,7 +1322,23 @@ def _analyze_mint_functionality(lines: List[str]) -> Optional[Dict[str, Any]]:
     else:
         line_num = 0
     
-    severity = "HIGH" if not mint_info["mint_access_control"] else "INFO"
+    # 根据权限控制情况确定严重程度
+    if not mint_info["mint_access_control"]:
+        # 如果mint只在构造函数中，即使没有检测到权限控制，也不应该标记为CRITICAL
+        # 因为构造函数只能被调用一次，且通常由部署者控制
+        if mint_info["mint_in_constructor"] and not mint_info["mint_function_exists"]:
+            severity = "INFO"  # 仅构造函数中的mint，相对安全
+        else:
+            severity = "CRITICAL"  # 运行时的mint缺少权限控制是严重问题
+    else:
+        detected_modifiers = mint_info.get("detected_access_modifiers", [])
+        # 检查权限控制是否足够
+        weak_patterns = ['public', 'external', 'internal', 'private']
+        is_weak = any(pattern in ' '.join(detected_modifiers).lower() for pattern in weak_patterns)
+        if is_weak:
+            severity = "HIGH"  # 权限控制不足
+        else:
+            severity = "INFO"  # 有适当的权限控制
     
     return {
         "severity": severity,
@@ -749,10 +1351,78 @@ def _analyze_mint_functionality(lines: List[str]) -> Optional[Dict[str, Any]]:
             "access_control": access_control_info,
             "has_max_supply": mint_info["has_max_supply"],
             "mint_in_constructor": mint_info["mint_in_constructor"],
-            "mint_function_exists": mint_info["mint_function_exists"]
+            "mint_function_exists": mint_info["mint_function_exists"],
+            "mint_code_snippet": mint_info["mint_code_snippet"],
+            "constructor_mint_code_snippet": mint_info["constructor_mint_code_snippet"],
+            "max_supply_code_snippet": mint_info["max_supply_code_snippet"],
+            "detected_access_modifiers": mint_info.get("detected_access_modifiers", [])
         },
-        "recommendation": "确认mint权限控制和最大供应量限制是否符合预期"
+        "recommendation": _generate_mint_recommendation(mint_info)
     }
+
+
+def _generate_mint_recommendation(mint_info: Dict[str, Any]) -> str:
+    """生成mint功能分析的建议"""
+    recommendations = []
+    
+    # 权限控制建议
+    if not mint_info["mint_access_control"]:
+        # 如果mint只在构造函数中，给出不同的建议
+        if mint_info["mint_in_constructor"] and not mint_info["mint_function_exists"]:
+            recommendations.append("mint仅在构造函数中，构造函数只能被调用一次，相对安全")
+            # 检查是否有继承关系
+            if mint_info.get("constructor_safe"):
+                recommendations.append("合约继承了权限控制合约（如Ownable），有权限控制机制")
+        else:
+            recommendations.append("严重：mint函数缺少权限控制，任何人都可以铸造代币，存在无限增发风险")
+            recommendations.append("  建议：添加onlyOwner、onlyRole、onlyMinter等权限修饰符")
+    else:
+        detected_modifiers = mint_info.get("detected_access_modifiers", [])
+        if detected_modifiers:
+            # 检查是否是构造函数继承的权限控制
+            if "constructor_with_access_control_inheritance" in detected_modifiers:
+                recommendations.append("mint仅在构造函数中，构造函数只能被调用一次，相对安全")
+                recommendations.append("合约继承了权限控制合约（如Ownable），有权限控制机制")
+            else:
+                # 检查权限控制是否足够严格
+                weak_patterns = ['public', 'external', 'internal', 'private', 'require_check']
+                is_weak = any(pattern in ' '.join(detected_modifiers).lower() for pattern in weak_patterns)
+                
+                # 检查是否有合适的权限修饰符
+                strong_patterns = [
+                    'onlyOwner', 'onlyRole', 'onlyMinter', 'onlyAdmin',
+                    'onlyOperator', 'onlyController', 'hasRole', 'requireRole',
+                    'onlyManager', 'onlyGovernor', 'onlyFactory', 'onlyBridge'
+                ]
+                has_strong_control = any(pattern in detected_modifiers for pattern in strong_patterns)
+                
+                # 检查是否有不合适的权限修饰符（如pause相关的用于mint）
+                inappropriate_patterns = ['onlyPauser', 'onlyUnpauser', 'whenPaused', 'whenNotPaused']
+                has_inappropriate = any(pattern in detected_modifiers for pattern in inappropriate_patterns)
+                
+                if has_inappropriate:
+                    recommendations.append(f"警告：检测到可能不合适的权限修饰符（{', '.join([p for p in detected_modifiers if p in inappropriate_patterns])}）")
+                    recommendations.append("  建议：mint函数应使用onlyMinter、onlyOwner等专门的权限控制，而非pause相关修饰符")
+                elif is_weak and not has_strong_control:
+                    recommendations.append(f"警告：mint函数的权限控制可能不足（检测到: {', '.join(set(detected_modifiers))}）")
+                    recommendations.append("  建议：使用onlyOwner、onlyRole或onlyMinter等严格的权限修饰符")
+                else:
+                    recommendations.append(f"mint函数有适当的权限控制（{', '.join(set(detected_modifiers))}）")
+        else:
+            recommendations.append("mint函数有权限控制（未识别具体修饰符）")
+    
+    # 最大供应量建议
+    if not mint_info["has_max_supply"]:
+        recommendations.append("警告：未检测到最大供应量限制，存在无限增发风险")
+        recommendations.append("  建议：添加maxSupply或cap限制，防止无限增发")
+    elif mint_info.get("max_supply_from_param"):
+        recommendations.append("最大供应量通过函数参数传入，部署/初始化时需确认具体值")
+    elif mint_info.get("max_supply_value"):
+        recommendations.append(f"检测到最大供应量限制: {mint_info['max_supply_value']}")
+    else:
+        recommendations.append("检测到最大供应量限制，但具体值需查看代码确认")
+    
+    return "\n".join(recommendations)
 
 
 def format_pattern_scan_results(issues: List[Dict[str, Any]]) -> str:

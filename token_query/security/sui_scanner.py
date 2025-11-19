@@ -250,7 +250,7 @@ def _check_transfer_functions(lines: List[str], module_name: str) -> List[Dict[s
 
 
 def _check_mintable(lines: List[str], module_name: str) -> List[Dict[str, Any]]:
-    """检查是否可增发，并分析mint形式、最大值限制等"""
+    """检查是否可增发，并分析mint形式、最大值限制等，提取代码片段"""
     issues = []
     mint_info = {
         "has_mint": False,
@@ -260,7 +260,11 @@ def _check_mintable(lines: List[str], module_name: str) -> List[Dict[str, Any]]:
         "max_supply_value": None,
         "mint_function_line": None,
         "init_mint_line": None,
-        "mint_access_control": False
+        "mint_access_control": False,
+        "fixed_supply": False,
+        "mint_code_snippet": None,
+        "init_mint_code_snippet": None,
+        "max_supply_code_snippet": None
     }
     
     in_init = False
@@ -295,8 +299,21 @@ def _check_mintable(lines: List[str], module_name: str) -> List[Dict[str, Any]]:
                 mint_info["has_mint"] = True
                 mint_info["mint_in_init"] = True
                 mint_info["init_mint_line"] = i
+            # 检查是否是固定供应量（make_supply_fixed_init）
+            if 'make_supply_fixed' in stripped.lower() or 'make_supply_fixed_init' in stripped.lower():
+                mint_info["fixed_supply"] = True
+                # 固定供应量的代币，init中的mint是安全的（只能调用一次）
+                mint_info["mint_access_control"] = True
             if stripped == '}' or (stripped.endswith('}') and '{' not in stripped):
                 in_init = False
+                if mint_info["mint_in_init"]:
+                    # 提取init函数中的mint相关代码（前后各5行）
+                    start = max(0, init_line - 1)
+                    end = min(len(lines), i + 1)
+                    mint_info["init_mint_code_snippet"] = '\n'.join(lines[start:end])
+                    # 如果init中使用了make_supply_fixed，说明是固定供应量，mint是安全的
+                    if mint_info.get("fixed_supply"):
+                        mint_info["mint_access_control"] = True
         
         # 在mint函数中查找权限控制
         if in_mint_function:
@@ -304,6 +321,10 @@ def _check_mintable(lines: List[str], module_name: str) -> List[Dict[str, Any]]:
                 mint_info["mint_access_control"] = True
             if stripped == '}' or (stripped.endswith('}') and '{' not in stripped):
                 in_mint_function = False
+                # 提取mint函数代码（前后各5行）
+                start = max(0, mint_function_line - 1)
+                end = min(len(lines), i + 1)
+                mint_info["mint_code_snippet"] = '\n'.join(lines[start:end])
                 # 检查函数体中是否有权限验证
                 for j in range(mint_function_line, min(len(lines), mint_function_line+30)):
                     if '}' in lines[j]:
@@ -319,10 +340,19 @@ def _check_mintable(lines: List[str], module_name: str) -> List[Dict[str, Any]]:
             num_match = re.search(r'(\d+)', stripped)
             if num_match:
                 mint_info["max_supply_value"] = num_match.group(1)
+            # 提取最大供应量相关代码（前后各3行）
+            if not mint_info["max_supply_code_snippet"]:
+                start = max(0, i - 4)
+                end = min(len(lines), i + 3)
+                mint_info["max_supply_code_snippet"] = '\n'.join(lines[start:end])
         
         # 查找FixedSupply相关
         if 'FixedSupply' in stripped or 'fixed_supply' in stripped.lower():
             mint_info["has_max_supply"] = True
+            if not mint_info["max_supply_code_snippet"]:
+                start = max(0, i - 4)
+                end = min(len(lines), i + 3)
+                mint_info["max_supply_code_snippet"] = '\n'.join(lines[start:end])
     
     if not mint_info["has_mint"]:
         return issues
@@ -343,7 +373,22 @@ def _check_mintable(lines: List[str], module_name: str) -> List[Dict[str, Any]]:
         else:
             max_supply_info = "有最大值限制（具体值需查看代码）"
     
-    access_control_info = "有权限控制" if mint_info["mint_access_control"] else "缺少权限控制"
+    # 智能评估权限控制
+    if mint_info["mint_access_control"]:
+        if mint_info.get("fixed_supply"):
+            access_control_info = "有权限控制（固定供应量，init中一次性铸造）"
+        else:
+            access_control_info = "有权限控制"
+    else:
+        # 如果mint只在init中，且是固定供应量，这也是安全的
+        if mint_info["mint_in_init"] and not mint_info["mint_function_exists"]:
+            if mint_info.get("fixed_supply"):
+                access_control_info = "有权限控制（固定供应量，init中一次性铸造）"
+                mint_info["mint_access_control"] = True
+            else:
+                access_control_info = "init中mint（相对安全，init只能调用一次）"
+        else:
+            access_control_info = "缺少权限控制"
     
     description = f"铸造形式: {mint_type}\n"
     description += f"最大值限制: {max_supply_info}\n"
@@ -371,7 +416,10 @@ def _check_mintable(lines: List[str], module_name: str) -> List[Dict[str, Any]]:
             "access_control": access_control_info,
             "has_max_supply": mint_info["has_max_supply"],
             "mint_in_init": mint_info["mint_in_init"],
-            "mint_function_exists": mint_info["mint_function_exists"]
+            "mint_function_exists": mint_info["mint_function_exists"],
+            "mint_code_snippet": mint_info["mint_code_snippet"],
+            "init_mint_code_snippet": mint_info["init_mint_code_snippet"],
+            "max_supply_code_snippet": mint_info["max_supply_code_snippet"]
         },
         "recommendation": "确认mint权限控制和最大供应量限制是否符合预期"
     })

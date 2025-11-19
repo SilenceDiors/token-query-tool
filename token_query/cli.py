@@ -242,6 +242,13 @@ def export_code_to_zip(code_info: Dict[str, Any], chain_name: str, token_address
     """
     if not code_info or not code_info.get("verified", False):
         print("无法导出：代码未验证或不可用")
+        if code_info:
+            if code_info.get("message"):
+                print(f"   原因: {code_info.get('message')}")
+            if code_info.get("note"):
+                print(f"   {code_info.get('note')}")
+            if code_info.get("web_url"):
+                print(f"   请访问区块浏览器查看: {code_info.get('web_url')}")
         return None
     
     if chain_name.lower() == "solana":
@@ -517,7 +524,6 @@ def query_token_universal(token_address: str, chain: Optional[str] = None, inclu
     elif chain_type == "evm":
         # 如果没有指定具体链，默认以太坊
         evm_chain = chain.lower() if chain and chain.lower() in EVM_CHAINS else "ethereum"
-        print(f"查询 EVM 代币 ({evm_chain})...")
         token_info = query_erc20_token(token_address, evm_chain)
     
     elif chain_type == "solana":
@@ -574,19 +580,6 @@ def query_token_universal(token_address: str, chain: Optional[str] = None, inclu
             ["原始值", str(total_supply)]
         ]
         print_table(supply_info, ["字段", "值"])
-        print()
-    
-    # 描述信息
-    if token_info.get('description'):
-        desc = token_info['description']
-        print("代币描述:")
-        print(desc)
-        print()
-    
-    # 图标URL
-    if token_info.get('iconUrl'):
-        print("代币图标URL:")
-        print(token_info['iconUrl'])
         print()
     
     # 区块浏览器链接
@@ -749,14 +742,11 @@ def query_token_info_only(token_address: str, chain: Optional[str] = None):
     token_info = None
     
     if chain_type == "sui":
-        print("查询 Sui 代币...")
         token_info = query_sui_token(token_address)
     elif chain_type == "evm":
         evm_chain = chain.lower() if chain and chain.lower() in EVM_CHAINS else "ethereum"
-        print(f"查询 EVM 代币 ({evm_chain})...")
         token_info = query_erc20_token(token_address, evm_chain)
     elif chain_type == "solana":
-        print("查询 Solana 代币...")
         token_info = query_solana_token(token_address)
     else:
         print("无法识别链类型，请手动指定")
@@ -770,7 +760,7 @@ def query_token_info_only(token_address: str, chain: Optional[str] = None):
     
     # 显示结果
     print_separator()
-    print("代币详细信息")
+    print("代币详细信息（来自区块链浏览器）")
     print_separator()
     print()
     
@@ -800,19 +790,6 @@ def query_token_info_only(token_address: str, chain: Optional[str] = None):
             ["原始值", str(total_supply)]
         ]
         print_table(supply_info, ["字段", "值"])
-        print()
-    
-    # 描述信息
-    if token_info.get('description'):
-        desc = token_info['description']
-        print("代币描述:")
-        print(desc)
-        print()
-    
-    # 图标URL
-    if token_info.get('iconUrl'):
-        print("代币图标URL:")
-        print(token_info['iconUrl'])
         print()
     
     # 区块浏览器链接
@@ -849,7 +826,8 @@ def generate_llm_prompt(token_address: str, chain_type: str, chain_name: str,
                         token_info: Optional[Dict[str, Any]] = None,
                         code_info: Optional[Dict[str, Any]] = None,
                         scan_results: Optional[Dict[str, Any]] = None,
-                        goplus_info: Optional[Dict[str, Any]] = None) -> str:
+                        goplus_info: Optional[Dict[str, Any]] = None,
+                        _code_info_for_snippets: Optional[Dict[str, Any]] = None) -> str:
     """
     生成LLM提示词，将所有扫描结果合并成美观的文档格式
     
@@ -904,7 +882,36 @@ def generate_llm_prompt(token_address: str, chain_type: str, chain_name: str,
         
         if code_info.get('verified'):
             if chain_type == "evm":
-                prompt_parts.append(f"合约名称: {code_info.get('contract_name', 'N/A')}")
+                contract_name = code_info.get('contract_name', 'N/A')
+                token_name = code_info.get('token_name')
+                token_symbol = code_info.get('token_symbol')
+                is_dynamic_name = code_info.get('is_dynamic_name', False)
+                is_dynamic_symbol = code_info.get('is_dynamic_symbol', False)
+                is_proxy = code_info.get('is_proxy', False)
+                impl_address = code_info.get('implementation_address')
+                proxy_address = code_info.get('proxy_address')
+                
+                # 如果是代理合约，显示代理信息
+                if is_proxy:
+                    if proxy_address:
+                        prompt_parts.append(f"代理合约地址: {proxy_address}")
+                    if impl_address:
+                        prompt_parts.append(f"实现合约地址: {impl_address}")
+                
+                # 优先显示从代码中提取的代币名称和符号
+                if token_name:
+                    name_note = "（动态参数）" if is_dynamic_name else ""
+                    prompt_parts.append(f"代币名称: {token_name}{name_note}")
+                elif is_dynamic_name:
+                    prompt_parts.append(f"代币名称: 动态参数（需从构造函数或初始化函数传入）")
+                
+                if token_symbol:
+                    symbol_note = "（动态参数）" if is_dynamic_symbol else ""
+                    prompt_parts.append(f"代币符号: {token_symbol}{symbol_note}")
+                elif is_dynamic_symbol:
+                    prompt_parts.append(f"代币符号: 动态参数（需从构造函数或初始化函数传入）")
+                
+                prompt_parts.append(f"合约名称: {contract_name}")
                 prompt_parts.append(f"编译器版本: {code_info.get('compiler_version', 'N/A')}")
                 prompt_parts.append(f"优化设置: {code_info.get('optimization_used', 'N/A')}")
                 prompt_parts.append(f"代码格式: {code_info.get('format', 'N/A')}")
@@ -943,43 +950,217 @@ def generate_llm_prompt(token_address: str, chain_type: str, chain_name: str,
         prompt_parts.append("## 3. 安全扫描结果")
         prompt_parts.append("-" * 80)
         
+        # 使用传入的code_info提取代码片段（如果没有传入，使用code_info参数）
+        code_info_for_snippets = _code_info_for_snippets if _code_info_for_snippets else code_info
+        
+        # 提取mint分析信息（优先显示）
+        mint_analysis = None
+        other_issues = []
+        
         if chain_type == "evm":
             # EVM 模式匹配扫描结果
             if isinstance(scan_results, list):
-                prompt_parts.append(f"检测到 {len(scan_results)} 个安全问题:")
-                for idx, issue in enumerate(scan_results, 1):
+                for issue in scan_results:
+                    if issue.get('title') == 'Mint功能分析':
+                        mint_analysis = issue
+                    else:
+                        other_issues.append(issue)
+                
+                # 合并所有问题，mint分析放在第一个
+                all_issues = []
+                if mint_analysis:
+                    all_issues.append(mint_analysis)
+                all_issues.extend(other_issues)
+                
+                prompt_parts.append(f"检测到 {len(all_issues)} 个安全问题:")
+                for idx, issue in enumerate(all_issues, 1):
                     prompt_parts.append(f"\n问题 #{idx}:")
                     prompt_parts.append(f"  严重程度: {issue.get('severity', 'UNKNOWN')}")
                     prompt_parts.append(f"  标题: {issue.get('title', 'N/A')}")
-                    prompt_parts.append(f"  描述: {issue.get('description', 'N/A')}")
-                    prompt_parts.append(f"  位置: 第 {issue.get('line', '?')} 行")
+                    
+                    # 如果是mint分析，显示详细信息（不显示描述，因为描述中已经包含了这些信息）
+                    if issue.get('title') == 'Mint功能分析':
+                        mint_data = issue.get('mint_analysis', {})
+                        prompt_parts.append(f"  铸造形式: {mint_data.get('mint_type', '未知')}")
+                        prompt_parts.append(f"  最大值限制: {mint_data.get('max_supply', '未知')}")
+                        prompt_parts.append(f"  权限控制: {mint_data.get('access_control', '未知')}")
+                        
+                        # 如果mint在父合约中，显示继承关系代码
+                        if mint_data.get('inherited_from'):
+                            prompt_parts.append(f"  继承的父合约: {', '.join(mint_data.get('inherited_from', []))}")
+                        prompt_parts.append(f"  位置: 第 {issue.get('line', '?')} 行")
+                    else:
+                        prompt_parts.append(f"  描述: {issue.get('description', 'N/A')}")
+                        prompt_parts.append(f"  位置: 第 {issue.get('line', '?')} 行")
+                    
+                    # 提取相关代码片段（所有问题都显示代码）
+                    if code_info_for_snippets and code_info_for_snippets.get("verified") and code_info_for_snippets.get("source_code"):
+                        source_code = code_info_for_snippets.get("source_code")
+                        if isinstance(source_code, str):
+                            # 对于mint分析，优先显示mint相关代码片段
+                            if issue.get('title') == 'Mint功能分析':
+                                mint_data = issue.get('mint_analysis', {})
+                                
+                                # 如果mint在父合约中，显示继承关系代码
+                                if mint_data.get('inherited_from'):
+                                    lines = source_code.split('\n')
+                                    for i, line in enumerate(lines, 1):
+                                        if 'contract ' in line and ' is ' in line:
+                                            start = max(0, i - 4)
+                                            end = min(len(lines), i + 3)
+                                            contract_def_code = '\n'.join(lines[start:end])
+                                            prompt_parts.append("")
+                                            prompt_parts.append("  相关代码（合约定义和继承关系）:")
+                                            prompt_parts.append("  ```solidity")
+                                            for j, code_line in enumerate(contract_def_code.split('\n'), start=start+1):
+                                                prompt_parts.append(f"  {code_line}")
+                                            prompt_parts.append("  ```")
+                                            break
+                                
+                                # 显示mint函数代码
+                                if mint_data.get('mint_code_snippet'):
+                                    prompt_parts.append("")
+                                    prompt_parts.append("  相关代码（Mint函数）:")
+                                    prompt_parts.append("  ```solidity")
+                                    for line in mint_data.get('mint_code_snippet').split('\n'):
+                                        prompt_parts.append(f"  {line}")
+                                    prompt_parts.append("  ```")
+                                
+                                # 显示构造函数中的mint代码
+                                if mint_data.get('constructor_mint_code_snippet'):
+                                    prompt_parts.append("")
+                                    prompt_parts.append("  相关代码（构造函数中的Mint）:")
+                                    prompt_parts.append("  ```solidity")
+                                    for line in mint_data.get('constructor_mint_code_snippet').split('\n'):
+                                        prompt_parts.append(f"  {line}")
+                                    prompt_parts.append("  ```")
+                                
+                                # 显示最大供应量限制代码
+                                if mint_data.get('max_supply_code_snippet'):
+                                    prompt_parts.append("")
+                                    prompt_parts.append("  相关代码（最大供应量限制）:")
+                                    prompt_parts.append("  ```solidity")
+                                    for line in mint_data.get('max_supply_code_snippet').split('\n'):
+                                        prompt_parts.append(f"  {line}")
+                                    prompt_parts.append("  ```")
+                            else:
+                                # 其他问题，显示问题行附近的代码
+                                issue_line = issue.get('line', 0)
+                                if issue_line and issue_line > 0:
+                                    lines = source_code.split('\n')
+                                    start_line = max(0, issue_line - 6)
+                                    end_line = min(len(lines), issue_line + 5)
+                                    code_snippet = '\n'.join(lines[start_line:end_line])
+                                    if code_snippet.strip():
+                                        prompt_parts.append("")
+                                        prompt_parts.append(f"  相关代码 (第 {start_line+1}-{end_line} 行):")
+                                        prompt_parts.append("  ```solidity")
+                                        for i, line in enumerate(code_snippet.split('\n'), start=start_line+1):
+                                            marker = ">>> " if i == issue_line else "    "
+                                            prompt_parts.append(f"  {marker}{line}")
+                                        prompt_parts.append("  ```")
+                    
                     if issue.get('recommendation'):
                         prompt_parts.append(f"  建议: {issue.get('recommendation')}")
         
         elif chain_type == "sui":
             # Sui 扫描结果
             if isinstance(scan_results, dict):
+                issues = scan_results.get("issues", [])
+                for issue in issues:
+                    if issue.get('title') == 'Mint功能分析':
+                        mint_analysis = issue
+                    else:
+                        other_issues.append(issue)
+                
+                # 合并所有问题，mint分析放在第一个
+                all_issues = []
+                if mint_analysis:
+                    all_issues.append(mint_analysis)
+                all_issues.extend(other_issues)
+                
                 summary = scan_results.get("summary", {})
-                prompt_parts.append(f"总问题数: {summary.get('total_issues', 0)}")
+                prompt_parts.append(f"检测到 {len(all_issues)} 个安全问题:")
                 prompt_parts.append(f"  - 严重 (CRITICAL): {summary.get('critical', 0)}")
                 prompt_parts.append(f"  - 高危 (HIGH): {summary.get('high', 0)}")
                 prompt_parts.append(f"  - 中危 (MEDIUM): {summary.get('medium', 0)}")
                 prompt_parts.append(f"  - 低危 (LOW): {summary.get('low', 0)}")
                 prompt_parts.append(f"  - 信息 (INFO): {summary.get('info', 0)}")
+                prompt_parts.append("")
                 
-                issues = scan_results.get("issues", [])
-                if issues:
-                    prompt_parts.append("\n详细问题列表:")
-                    for idx, issue in enumerate(issues, 1):
-                        prompt_parts.append(f"\n问题 #{idx}:")
-                        prompt_parts.append(f"  严重程度: {issue.get('severity', 'UNKNOWN')}")
-                        prompt_parts.append(f"  标题: {issue.get('title', 'N/A')}")
-                        prompt_parts.append(f"  描述: {issue.get('description', 'N/A')}")
-                        prompt_parts.append(f"  位置: [{issue.get('module', 'N/A')}] 第 {issue.get('line', '?')} 行")
-                        if issue.get('function') and issue.get('function') != 'N/A':
-                            prompt_parts.append(f"  函数: {issue.get('function')}")
-                        if issue.get('recommendation'):
-                            prompt_parts.append(f"  建议: {issue.get('recommendation')}")
+                for idx, issue in enumerate(all_issues, 1):
+                    prompt_parts.append(f"\n问题 #{idx}:")
+                    prompt_parts.append(f"  严重程度: {issue.get('severity', 'UNKNOWN')}")
+                    prompt_parts.append(f"  标题: {issue.get('title', 'N/A')}")
+                    prompt_parts.append(f"  描述: {issue.get('description', 'N/A')}")
+                    prompt_parts.append(f"  位置: [{issue.get('module', 'N/A')}] 第 {issue.get('line', '?')} 行")
+                    if issue.get('function') and issue.get('function') != 'N/A':
+                        prompt_parts.append(f"  函数: {issue.get('function')}")
+                    
+                    # 如果是mint分析，显示详细信息
+                    if issue.get('title') == 'Mint功能分析':
+                        mint_data = issue.get('mint_analysis', {})
+                        prompt_parts.append(f"  铸造形式: {mint_data.get('mint_type', '未知')}")
+                        prompt_parts.append(f"  最大值限制: {mint_data.get('max_supply', '未知')}")
+                        prompt_parts.append(f"  权限控制: {mint_data.get('access_control', '未知')}")
+                    
+                    # 提取相关代码片段（所有问题都显示代码）
+                    if code_info_for_snippets and code_info_for_snippets.get("verified") and code_info_for_snippets.get("source_code"):
+                        source_code_dict = code_info_for_snippets.get("source_code", {})
+                        if isinstance(source_code_dict, dict):
+                            module_name = issue.get('module', '')
+                            if module_name and module_name in source_code_dict:
+                                module_code = source_code_dict[module_name]
+                                if isinstance(module_code, str):
+                                    # 对于mint分析，优先显示mint相关代码片段
+                                    if issue.get('title') == 'Mint功能分析':
+                                        mint_data = issue.get('mint_analysis', {})
+                                        
+                                        # 显示mint函数代码
+                                        if mint_data.get('mint_code_snippet'):
+                                            prompt_parts.append("")
+                                            prompt_parts.append("  相关代码（Mint函数）:")
+                                            prompt_parts.append("  ```move")
+                                            for line in mint_data.get('mint_code_snippet').split('\n'):
+                                                prompt_parts.append(f"  {line}")
+                                            prompt_parts.append("  ```")
+                                        
+                                        # 显示init函数中的mint代码
+                                        if mint_data.get('init_mint_code_snippet'):
+                                            prompt_parts.append("")
+                                            prompt_parts.append("  相关代码（Init函数中的Mint）:")
+                                            prompt_parts.append("  ```move")
+                                            for line in mint_data.get('init_mint_code_snippet').split('\n'):
+                                                prompt_parts.append(f"  {line}")
+                                            prompt_parts.append("  ```")
+                                        
+                                        # 显示最大供应量限制代码
+                                        if mint_data.get('max_supply_code_snippet'):
+                                            prompt_parts.append("")
+                                            prompt_parts.append("  相关代码（最大供应量限制）:")
+                                            prompt_parts.append("  ```move")
+                                            for line in mint_data.get('max_supply_code_snippet').split('\n'):
+                                                prompt_parts.append(f"  {line}")
+                                            prompt_parts.append("  ```")
+                                    else:
+                                        # 其他问题，显示问题行附近的代码
+                                        issue_line = issue.get('line', 0)
+                                        if issue_line and issue_line > 0:
+                                            lines = module_code.split('\n')
+                                            start_line = max(0, issue_line - 6)
+                                            end_line = min(len(lines), issue_line + 5)
+                                            code_snippet = '\n'.join(lines[start_line:end_line])
+                                            if code_snippet.strip():
+                                                prompt_parts.append("")
+                                                prompt_parts.append(f"  相关代码 (第 {start_line+1}-{end_line} 行):")
+                                                prompt_parts.append("  ```move")
+                                                for i, line in enumerate(code_snippet.split('\n'), start=start_line+1):
+                                                    marker = ">>> " if i == issue_line else "    "
+                                                    prompt_parts.append(f"  {marker}{line}")
+                                                prompt_parts.append("  ```")
+                    
+                    if issue.get('recommendation'):
+                        prompt_parts.append(f"  建议: {issue.get('recommendation')}")
         prompt_parts.append("")
     
     # GoPlus Labs 安全信息
@@ -1084,6 +1265,16 @@ def generate_llm_prompt(token_address: str, chain_type: str, chain_name: str,
             for warning in risk_warnings:
                 prompt_parts.append(f"  {warning}")
         
+        # Mint功能分析（从GoPlus API推断，用于Solana等无法读取代码的链）
+        from token_query.security.goplus_scanner import _analyze_mint_from_goplus
+        goplus_mint_analysis = _analyze_mint_from_goplus(goplus_info)
+        if goplus_mint_analysis:
+            prompt_parts.append("\n### Mint功能分析 (基于GoPlus API数据):")
+            prompt_parts.append(f"铸造形式: {goplus_mint_analysis.get('mint_type', '未知')}")
+            prompt_parts.append(f"最大值限制: {goplus_mint_analysis.get('max_supply', '未知')}")
+            prompt_parts.append(f"权限控制: {goplus_mint_analysis.get('access_control', '未知')}")
+            prompt_parts.append("注意: 由于无法读取源代码，此分析基于GoPlus Labs API数据推断")
+        
         prompt_parts.append("")
     
     # 生成报告的指令
@@ -1125,12 +1316,419 @@ def generate_llm_prompt(token_address: str, chain_type: str, chain_name: str,
     return "\n".join(prompt_parts)
 
 
+def query_mint_analysis(token_address: str, chain: Optional[str] = None):
+    """
+    只显示Mint功能分析
+    """
+    print_separator()
+    print("正在分析Mint功能...")
+    print_separator()
+    print(f"代币地址: {token_address}")
+    print()
+    
+    # 检测链类型
+    if chain:
+        chain_type = chain.lower()
+        if chain_type == "eth":
+            chain_type = "ethereum"
+        elif chain_type == "sol":
+            chain_type = "solana"
+        
+        if chain_type in EVM_CHAINS:
+            chain_type = "evm"
+        elif chain_type == "solana":
+            chain_type = "solana"
+        elif chain_type == "sui":
+            chain_type = "sui"
+    else:
+        chain_type, token_address = detect_chain_type(token_address)
+    
+    # 显示检测结果
+    if chain_type == "evm":
+        evm_chain = chain.lower() if chain and chain.lower() in EVM_CHAINS else "ethereum"
+        if chain:
+            print(f"检测到的链类型: EVM - {evm_chain} (用户指定)")
+        else:
+            print(f"检测到的链类型: EVM - {evm_chain} (自动检测，默认以太坊)")
+    else:
+        if chain:
+            print(f"检测到的链类型: {chain_type.upper()} (用户指定)")
+        else:
+            print(f"检测到的链类型: {chain_type.upper()} (自动检测)")
+    print()
+    
+    chain_name = evm_chain if chain_type == "evm" else chain_type
+    
+    # 根据链类型执行不同的分析
+    if chain_type == "evm":
+        print("正在获取合约代码...")
+        code_info = get_evm_contract_code(token_address, chain_name)
+        
+        if code_info:
+            if code_info.get("verified", False):
+                original_source_code = code_info.get("source_code")
+                source_code = code_info.get("combined_source") or original_source_code
+                
+                if source_code and (isinstance(source_code, str) and len(source_code) > 100) or (isinstance(source_code, dict) and len(source_code) > 0):
+                    # 提取主合约代码
+                    if code_info.get("format") == "multi_file" and isinstance(original_source_code, dict):
+                        main_file = None
+                        contract_name_hint = code_info.get("contract_name", "Contract")
+                        for filename, content in original_source_code.items():
+                            if isinstance(content, dict) and "content" in content:
+                                file_content = content["content"]
+                            else:
+                                file_content = content
+                            
+                            if contract_name_hint.lower() in filename.lower():
+                                main_file = file_content
+                                break
+                        
+                        if not main_file:
+                            first_content = list(original_source_code.values())[0]
+                            if isinstance(first_content, dict) and "content" in first_content:
+                                main_file = first_content["content"]
+                            else:
+                                main_file = first_content
+                        
+                        source_code = main_file if main_file else source_code
+                    else:
+                        source_code = source_code if isinstance(source_code, str) else str(source_code)
+                    
+                    try:
+                        from token_query.security import scan_with_patterns
+                        pattern_issues = scan_with_patterns(source_code)
+                        # 只提取mint分析
+                        mint_analysis = None
+                        for issue in pattern_issues:
+                            if issue.get('title') == 'Mint功能分析':
+                                mint_analysis = issue
+                                break
+                        
+                        if mint_analysis:
+                            print()
+                            print_separator()
+                            print("Mint功能分析")
+                            print_separator()
+                            print()
+                            
+                            mint_data = mint_analysis.get('mint_analysis', {})
+                            print(f"铸造形式: {mint_data.get('mint_type', '未知')}")
+                            print(f"最大值限制: {mint_data.get('max_supply', '未知')}")
+                            print(f"权限控制: {mint_data.get('access_control', '未知')}")
+                            
+                            # 显示检测到的权限修饰符
+                            detected_modifiers = mint_data.get('detected_access_modifiers', [])
+                            if detected_modifiers:
+                                print(f"检测到的权限修饰符: {', '.join(set(detected_modifiers))}")
+                            
+                            if mint_data.get('inherited_from'):
+                                print(f"继承的父合约: {', '.join(mint_data.get('inherited_from', []))}")
+                            
+                            # 显示建议
+                            recommendation = mint_analysis.get('recommendation', '')
+                            if recommendation:
+                                print()
+                                print("建议:")
+                                print("-" * 80)
+                                print(recommendation)
+                            
+                            print()
+                            print("相关代码:")
+                            print("-" * 80)
+                            
+                            if mint_data.get('inherited_from'):
+                                # 显示合约定义和继承关系
+                                lines = source_code.split('\n')
+                                for i, line in enumerate(lines, 1):
+                                    if 'contract ' in line and ' is ' in line:
+                                        start = max(0, i - 4)
+                                        end = min(len(lines), i + 3)
+                                        contract_def_code = '\n'.join(lines[start:end])
+                                        print("合约定义和继承关系:")
+                                        print("```solidity")
+                                        print(contract_def_code)
+                                        print("```")
+                                        break
+                            
+                            if mint_data.get('mint_code_snippet'):
+                                print()
+                                print("Mint函数:")
+                                print("```solidity")
+                                print(mint_data.get('mint_code_snippet'))
+                                print("```")
+                            
+                            if mint_data.get('constructor_mint_code_snippet'):
+                                print()
+                                print("构造函数中的Mint:")
+                                print("```solidity")
+                                print(mint_data.get('constructor_mint_code_snippet'))
+                                print("```")
+                            
+                            if mint_data.get('max_supply_code_snippet'):
+                                print()
+                                print("最大供应量限制:")
+                                print("```solidity")
+                                print(mint_data.get('max_supply_code_snippet'))
+                                print("```")
+                        else:
+                            print("   未检测到Mint功能")
+                    except Exception as e:
+                        print(f"   分析失败: {e}")
+                else:
+                    # 代码未验证或无法获取
+                    print()
+                    print("无法获取合约代码")
+                    if code_info.get("message"):
+                        print(f"   原因: {code_info.get('message')}")
+                    if code_info.get("web_url"):
+                        print(f"   请访问区块浏览器查看: {code_info.get('web_url')}")
+                    if code_info.get("note"):
+                        print(f"   {code_info.get('note')}")
+            else:
+                # 代码未验证或无法获取
+                print()
+                print("无法获取合约代码")
+                if code_info.get("message"):
+                    print(f"   原因: {code_info.get('message')}")
+                if code_info.get("web_url"):
+                    print(f"   请访问区块浏览器查看: {code_info.get('web_url')}")
+                if code_info.get("note"):
+                    print(f"   {code_info.get('note')}")
+        else:
+            print("无法获取合约代码（可能该地址不是合约地址或网络错误）")
+    
+    elif chain_type == "sui":
+        print("正在获取合约代码...")
+        code_info = get_sui_move_code(token_address)
+        
+        if code_info and code_info.get("verified", False):
+            source_code = code_info.get("source_code", {})
+            package_address = code_info.get("package_address", token_address)
+            
+            try:
+                from token_query.security import scan_sui_move_code
+                
+                if isinstance(source_code, dict) and code_info.get("format") == "move_source":
+                    scan_results = scan_sui_move_code(source_code, package_address)
+                    if isinstance(scan_results, dict):
+                        issues = scan_results.get("issues", [])
+                        mint_analysis = None
+                        for issue in issues:
+                            if issue.get('title') == 'Mint功能分析':
+                                mint_analysis = issue
+                                break
+                        
+                        if mint_analysis:
+                            print()
+                            print_separator()
+                            print("Mint功能分析")
+                            print_separator()
+                            print()
+                            
+                            mint_data = mint_analysis.get('mint_analysis', {})
+                            print(f"铸造形式: {mint_data.get('mint_type', '未知')}")
+                            print(f"最大值限制: {mint_data.get('max_supply', '未知')}")
+                            print(f"权限控制: {mint_data.get('access_control', '未知')}")
+                            
+                            # 显示检测到的权限修饰符
+                            detected_modifiers = mint_data.get('detected_access_modifiers', [])
+                            if detected_modifiers:
+                                print(f"检测到的权限修饰符: {', '.join(set(detected_modifiers))}")
+                            
+                            # 显示建议
+                            recommendation = mint_analysis.get('recommendation', '')
+                            if recommendation:
+                                print()
+                                print("建议:")
+                                print("-" * 80)
+                                print(recommendation)
+                            
+                            print()
+                            print("相关代码:")
+                            print("-" * 80)
+                            
+                            if mint_data.get('mint_code_snippet'):
+                                print("Mint函数:")
+                                print("```move")
+                                print(mint_data.get('mint_code_snippet'))
+                                print("```")
+                            
+                            if mint_data.get('init_mint_code_snippet'):
+                                print()
+                                print("Init函数中的Mint:")
+                                print("```move")
+                                print(mint_data.get('init_mint_code_snippet'))
+                                print("```")
+                            
+                            if mint_data.get('max_supply_code_snippet'):
+                                print()
+                                print("最大供应量限制:")
+                                print("```move")
+                                print(mint_data.get('max_supply_code_snippet'))
+                                print("```")
+                        else:
+                            print("   未检测到Mint功能")
+            except Exception as e:
+                print(f"   分析失败: {e}")
+        else:
+            print("无法获取合约代码")
+    
+    elif chain_type == "solana":
+        # Solana 无法读取代码，从GoPlus获取
+        try:
+            from token_query.security import get_token_security_info, format_goplus_results
+            print("正在获取代币安全信息 (GoPlus Labs)...")
+            goplus_info, error_msg = get_token_security_info(token_address, chain_name)
+            if goplus_info:
+                # 从GoPlus结果中提取mint信息
+                from token_query.security.goplus_scanner import _analyze_mint_from_goplus
+                mint_analysis = _analyze_mint_from_goplus(goplus_info)
+                if mint_analysis:
+                    print()
+                    print_separator()
+                    print("Mint功能分析（基于GoPlus Labs数据）")
+                    print_separator()
+                    print()
+                    mint_data = mint_analysis.get('mint_analysis', {})
+                    print(f"铸造形式: {mint_data.get('mint_type', '未知')}")
+                    print(f"最大值限制: {mint_data.get('max_supply', '未知')}")
+                    print(f"权限控制: {mint_data.get('access_control', '未知')}")
+                else:
+                    print("   无法从GoPlus获取Mint信息")
+            elif error_msg:
+                print(f"   {error_msg}")
+            else:
+                print("   无法获取 GoPlus 安全信息")
+        except Exception as e:
+            print(f"   分析失败: {e}")
+    
+    print()
+    print_separator()
+    print("分析完成")
+    print_separator()
+
+
+def query_goplus_info(token_address: str, chain: Optional[str] = None):
+    """
+    只显示GoPlus Labs代币安全信息
+    """
+    print_separator()
+    print("正在获取GoPlus Labs代币安全信息...")
+    print_separator()
+    print(f"代币地址: {token_address}")
+    print()
+    
+    # 检测链类型
+    if chain:
+        chain_type = chain.lower()
+        if chain_type == "eth":
+            chain_type = "ethereum"
+        elif chain_type == "sol":
+            chain_type = "solana"
+        
+        if chain_type in EVM_CHAINS:
+            chain_type = "evm"
+        elif chain_type == "solana":
+            chain_type = "solana"
+        elif chain_type == "sui":
+            chain_type = "sui"
+    else:
+        chain_type, token_address = detect_chain_type(token_address)
+    
+    # 显示检测结果
+    if chain_type == "evm":
+        evm_chain = chain.lower() if chain and chain.lower() in EVM_CHAINS else "ethereum"
+        if chain:
+            print(f"检测到的链类型: EVM - {evm_chain} (用户指定)")
+        else:
+            print(f"检测到的链类型: EVM - {evm_chain} (自动检测，默认以太坊)")
+    else:
+        if chain:
+            print(f"检测到的链类型: {chain_type.upper()} (用户指定)")
+        else:
+            print(f"检测到的链类型: {chain_type.upper()} (自动检测)")
+    print()
+    
+    chain_name = evm_chain if chain_type == "evm" else chain_type
+    
+    # 获取GoPlus信息
+    try:
+        from token_query.security import get_token_security_info, format_goplus_results
+        
+        # 对于Sui，如果输入的是package地址，需要先查询代币信息获取coinType
+        goplus_address = token_address
+        if chain_type == "sui" and "::" not in token_address:
+            from token_query.chains import query_sui_token
+            print("检测到 package 地址，正在查找代币类型...")
+            token_info = query_sui_token(token_address)
+            if token_info and token_info.get("coinType"):
+                goplus_address = token_info.get("coinType")
+                print(f"找到 coinType: {goplus_address}")
+            else:
+                # 从package中查找可能的代币类型
+                try:
+                    import requests
+                    from token_query.config import RPC_ENDPOINTS
+                    rpc_url = RPC_ENDPOINTS["sui"]
+                    
+                    module_payload = {
+                        "jsonrpc": "2.0",
+                        "id": 0,
+                        "method": "sui_getNormalizedMoveModulesByPackage",
+                        "params": [token_address]
+                    }
+                    module_response = requests.post(rpc_url, json=module_payload, timeout=10)
+                    module_response.raise_for_status()
+                    module_result = module_response.json()
+                    
+                    if module_result and "result" in module_result and module_result["result"]:
+                        modules = module_result["result"]
+                        possible_coin_types = []
+                        
+                        for module_name, module_info in modules.items():
+                            if "structs" in module_info:
+                                structs = module_info["structs"]
+                                for struct_name, struct_info in structs.items():
+                                    if "Coin" in struct_name or "Token" in struct_name:
+                                        coin_type = f"{token_address}::{module_name}::{struct_name}"
+                                        possible_coin_types.insert(0, coin_type)
+                                    else:
+                                        coin_type = f"{token_address}::{module_name}::{struct_name}"
+                                        possible_coin_types.append(coin_type)
+                        
+                        if possible_coin_types:
+                            goplus_address = possible_coin_types[0]
+                            print(f"使用 coinType: {goplus_address}")
+                except:
+                    pass
+        
+        # 如果是 EVM 链且未指定具体链，尝试所有 EVM 链
+        try_all_evm = (chain_type == "evm" and (not chain or chain.lower() == "ethereum"))
+        goplus_info, error_msg = get_token_security_info(goplus_address, chain_name, try_all_evm=try_all_evm)
+        
+        if goplus_info:
+            goplus_output = format_goplus_results(goplus_info)
+            print(goplus_output)
+        elif error_msg:
+            print(f"   {error_msg}")
+        else:
+            print("   无法获取 GoPlus 安全信息（可能该代币未在 GoPlus 数据库中）")
+    except Exception as e:
+        print(f"   获取失败: {e}")
+    
+    print()
+    print_separator()
+    print("查询完成")
+    print_separator()
+
+
 def scan_token_security(token_address: str, chain: Optional[str] = None):
     """
-    安全扫描（根据链类型显示不同内容）
-    - ETH: 模式匹配扫描结果 + GoPlus（无需编译，直接分析源代码）
-    - SUI: Sui扫描脚本结果 + GoPlus
-    - Solana: 只显示GoPlus
+    安全扫描（只显示安全扫描结果，不包含mint和goplus）
+    - ETH: 模式匹配扫描结果（排除mint分析）
+    - SUI: Sui扫描脚本结果（排除mint分析）
+    - Solana: 不支持（无法读取代码）
     """
     print_separator()
     print("正在执行安全扫描...")
@@ -1227,6 +1825,8 @@ def scan_token_security(token_address: str, chain: Optional[str] = None):
                 try:
                     from token_query.security import scan_with_patterns, format_pattern_scan_results
                     pattern_issues = scan_with_patterns(source_code)
+                    # 排除mint分析（mint分析有单独的--mint命令）
+                    pattern_issues = [i for i in pattern_issues if i.get('title') != 'Mint功能分析']
                     scan_results = pattern_issues  # 保存扫描结果
                     if pattern_issues:
                         formatted_results = format_pattern_scan_results(pattern_issues)
@@ -1235,24 +1835,6 @@ def scan_token_security(token_address: str, chain: Optional[str] = None):
                         print("   未发现常见安全问题")
                 except Exception as e:
                     print(f"   ⚠️  模式匹配扫描失败: {e}")
-        
-        # GoPlus Labs
-        try:
-            from token_query.security import get_token_security_info, format_goplus_results
-            print()
-            print("正在获取代币安全信息 (GoPlus Labs)...")
-            # 如果是 EVM 链且未指定具体链，尝试所有 EVM 链
-            try_all_evm = (chain_type == "evm" and (not chain or chain.lower() == "ethereum"))
-            goplus_info, error_msg = get_token_security_info(token_address, chain_name, try_all_evm=try_all_evm)
-            if goplus_info:
-                goplus_output = format_goplus_results(goplus_info)
-                print(goplus_output)
-            elif error_msg:
-                print(f"   {error_msg}")
-            else:
-                print("   ⚠️  无法获取 GoPlus 安全信息（可能该代币未在 GoPlus 数据库中）")
-        except Exception as e:
-            pass
     
     elif chain_type == "sui":
         # SUI: Sui扫描脚本 + GoPlus
@@ -1275,109 +1857,36 @@ def scan_token_security(token_address: str, chain: Optional[str] = None):
                     print()
                     
                     scan_results = scan_sui_move_code(source_code, package_address)
+                    # 排除mint分析（mint分析有单独的--mint命令）
+                    if isinstance(scan_results, dict):
+                        issues = scan_results.get("issues", [])
+                        scan_results["issues"] = [i for i in issues if i.get('title') != 'Mint功能分析']
+                        # 重新计算统计
+                        summary = scan_results.get("summary", {})
+                        critical = [i for i in scan_results["issues"] if i.get('severity') == 'CRITICAL']
+                        high = [i for i in scan_results["issues"] if i.get('severity') == 'HIGH']
+                        medium = [i for i in scan_results["issues"] if i.get('severity') == 'MEDIUM']
+                        low = [i for i in scan_results["issues"] if i.get('severity') == 'LOW']
+                        info = [i for i in scan_results["issues"] if i.get('severity') == 'INFO']
+                        summary['total_issues'] = len(scan_results["issues"])
+                        summary['critical'] = len(critical)
+                        summary['high'] = len(high)
+                        summary['medium'] = len(medium)
+                        summary['low'] = len(low)
+                        summary['info'] = len(info)
+                    
                     formatted_results = format_sui_scan_results(scan_results)
                     print(formatted_results)
             except Exception as e:
                 print(f"Sui 扫描失败: {e}")
                 scan_results = None
-        
-        # GoPlus Labs
-        try:
-            from token_query.security import get_token_security_info, format_goplus_results
-            from token_query.chains import query_sui_token
-            
-            print()
-            print("正在获取代币安全信息 (GoPlus Labs)...")
-            
-            # 对于 Sui，如果输入的是 package 地址，需要先查询代币信息获取 coinType
-            goplus_address = token_address
-            if "::" not in token_address:
-                # 输入的是 package 地址，需要从 package 中查找可能的代币类型
-                print("   检测到 package 地址，正在查找代币类型...")
-                
-                # 方法1: 尝试查询代币信息（如果 package 中有代币对象）
-                token_info = query_sui_token(token_address)
-                if token_info and token_info.get("coinType"):
-                    goplus_address = token_info.get("coinType")
-                    print(f"   找到 coinType: {goplus_address}")
-                else:
-                    # 方法2: 从 package 的模块中查找可能的代币类型
-                    try:
-                        import requests
-                        from token_query.config import RPC_ENDPOINTS
-                        rpc_url = RPC_ENDPOINTS["sui"]
-                        
-                        module_payload = {
-                            "jsonrpc": "2.0",
-                            "id": 0,
-                            "method": "sui_getNormalizedMoveModulesByPackage",
-                            "params": [token_address]
-                        }
-                        module_response = requests.post(rpc_url, json=module_payload, timeout=10)
-                        module_response.raise_for_status()
-                        module_result = module_response.json()
-                        
-                        if module_result and "result" in module_result and module_result["result"]:
-                            modules = module_result["result"]
-                            possible_coin_types = []
-                            
-                            for module_name, module_info in modules.items():
-                                if "structs" in module_info:
-                                    structs = module_info["structs"]
-                                    for struct_name, struct_info in structs.items():
-                                        coin_type = f"{token_address}::{module_name}::{struct_name}"
-                                        # 优先查找包含 Coin/Token 关键词的类型
-                                        if any(keyword in struct_name for keyword in ["Coin", "Token", "COIN", "TOKEN"]):
-                                            possible_coin_types.insert(0, coin_type)  # 插入到前面
-                                        else:
-                                            # 其他类型也添加到列表中
-                                            possible_coin_types.append(coin_type)
-                            
-                            if possible_coin_types:
-                                # 使用第一个找到的代币类型
-                                goplus_address = possible_coin_types[0]
-                                print(f"   从 package 模块中找到 coinType: {goplus_address}")
-                                if len(possible_coin_types) > 1:
-                                    print(f"   （共找到 {len(possible_coin_types)} 个可能的代币类型，使用第一个）")
-                                    print(f"   其他类型: {', '.join(possible_coin_types[1:3])}{'...' if len(possible_coin_types) > 3 else ''}")
-                            else:
-                                print("   无法从 package 中找到代币类型")
-                                print("   提示: 请使用完整的 coinType 格式: 0x...::module::Type")
-                    except Exception as e:
-                        print(f"   查询 package 模块失败: {e}")
-                        print("   提示: 请使用完整的 coinType 格式: 0x...::module::Type")
-            
-            # 获取 GoPlus Labs 信息
-            goplus_info, error_msg = get_token_security_info(goplus_address, "sui")
-            if goplus_info:
-                goplus_output = format_goplus_results(goplus_info)
-                print(goplus_output)
-            elif error_msg:
-                print(f"   {error_msg}")
-            else:
-                print("   ⚠️  无法获取 GoPlus 安全信息（可能该代币未在 GoPlus 数据库中）")
-        except Exception as e:
-            import traceback
-            print(f"   获取 GoPlus 安全信息失败: {e}")
-            # 不打印完整 traceback，避免输出过长
     
     elif chain_type == "solana":
-        # Solana: 只显示GoPlus
-        try:
-            from token_query.security import get_token_security_info, format_goplus_results
-            print()
-            print("正在获取代币安全信息 (GoPlus Labs)...")
-            goplus_info, error_msg = get_token_security_info(token_address, "solana")
-            if goplus_info:
-                goplus_output = format_goplus_results(goplus_info)
-                print(goplus_output)
-            elif error_msg:
-                print(f"   {error_msg}")
-            else:
-                print("   ⚠️  无法获取 GoPlus 安全信息（可能该代币未在 GoPlus 数据库中）")
-        except Exception as e:
-            print(f"⚠️  获取 GoPlus 安全信息失败: {e}")
+        # Solana: 不支持（无法读取代码）
+        print("   Solana 链不支持安全扫描（无法读取代码）")
+        print("   请使用 --goplus 命令查看 GoPlus Labs 安全信息")
     
+    print()
     print_separator()
     print("扫描完成")
     print_separator()
@@ -1530,16 +2039,45 @@ def generate_llm_report(token_address: str, chain: Optional[str] = None):
         elif chain_type == "evm":
             evm_chain = chain.lower() if chain and chain.lower() in EVM_CHAINS else "ethereum"
             code_info = get_evm_contract_code(token_address, evm_chain)
+            if code_info:
+                if code_info.get("verified"):
+                    print(f"   代码获取成功: {code_info.get('format', 'unknown')} 格式")
+                    if code_info.get("format") == "single_file":
+                        code_len = len(code_info.get("source_code", ""))
+                        print(f"   代码长度: {code_len} 字符")
+                        # 如果代码太短，可能是只获取到了部分代码
+                        if code_len < 1000:
+                            print(f"   警告: 代码长度较短，可能只获取到部分代码")
+                            # 显示前200字符预览
+                            preview = code_info.get("source_code", "")[:200]
+                            print(f"   代码预览: {preview}...")
+                    elif code_info.get("format") == "multi_file":
+                        file_count = len(code_info.get("source_code", {}))
+                        print(f"   文件数量: {file_count}")
+                        # 显示文件列表
+                        for filename in list(code_info.get("source_code", {}).keys())[:5]:
+                            print(f"     - {filename}")
+                else:
+                    print(f"   代码未验证: {code_info.get('message', '未知原因')}")
+                    if code_info.get("web_url"):
+                        print(f"   请手动查看: {code_info.get('web_url')}")
+            else:
+                print("   无法获取代码信息")
         elif chain_type == "solana":
             code_info = get_solana_program_code(token_address)
     except Exception as e:
         print(f"   获取代码信息失败: {e}")
+        import traceback
+        traceback.print_exc()
     
     # 3. 执行安全扫描
     print("正在执行安全扫描...")
     try:
-        if chain_type == "evm" and code_info and code_info.get("verified", False):
-            original_source_code = code_info.get("source_code")
+        if chain_type == "evm" and code_info:
+            if not code_info.get("verified", False):
+                print("   代码未验证，跳过安全扫描")
+            else:
+                original_source_code = code_info.get("source_code")
             source_code = code_info.get("combined_source") or original_source_code
             
             if source_code and (isinstance(source_code, str) and len(source_code) > 100) or (isinstance(source_code, dict) and len(source_code) > 0):
@@ -1575,8 +2113,14 @@ def generate_llm_report(token_address: str, chain: Optional[str] = None):
             if isinstance(source_code, dict) and code_info.get("format") == "move_source":
                 from token_query.security import scan_sui_move_code
                 scan_results = scan_sui_move_code(source_code, package_address)
+                if isinstance(scan_results, dict):
+                    print(f"   扫描完成，发现 {scan_results.get('summary', {}).get('total_issues', 0)} 个问题")
+            else:
+                print("   代码格式不正确，跳过安全扫描")
     except Exception as e:
         print(f"   安全扫描失败: {e}")
+        import traceback
+        traceback.print_exc()
     
     # 4. 获取 GoPlus Labs 信息
     print("正在获取 GoPlus Labs 安全信息...")
@@ -1632,8 +2176,8 @@ def generate_llm_report(token_address: str, chain: Optional[str] = None):
     print_separator()
     print()
     
-    # 生成LLM提示词
-    llm_prompt = generate_llm_prompt(token_address, chain_type, chain_name, token_info, code_info, scan_results, goplus_info)
+    # 生成LLM提示词（传递code_info以便提取代码片段）
+    llm_prompt = generate_llm_prompt(token_address, chain_type, chain_name, token_info, code_info, scan_results, goplus_info, code_info)
     print(llm_prompt)
     print()
     
@@ -1662,11 +2206,13 @@ def print_usage():
     print("选项:")
     print("  --info, -i          显示代币基础信息（不包含代码）")
     print("  --code, -c          生成代币代码压缩包（EVM和Sui，不包括Solana）")
-    print("  --scan, -s          显示安全扫描信息")
-    print("                       - ETH: 模式匹配扫描结果 + GoPlus")
-    print("                       - SUI: Sui扫描脚本结果 + GoPlus")
-    print("                       - Solana: GoPlus结果")
-    print("  --llm, -l           生成LLM提示词（收集所有信息并生成文档提示词）")
+    print("  --mint, -m          显示Mint功能分析（铸造形式、最大值限制、权限控制）")
+    print("  --goplus, -g         显示GoPlus Labs代币安全信息")
+    print("  --scan, -s          显示安全扫描结果（排除mint和goplus）")
+    print("                       - ETH: 模式匹配扫描结果")
+    print("                       - SUI: Sui扫描脚本结果")
+    print("                       - Solana: 不支持（无法读取代码）")
+    print("  --llm, -l           生成LLM提示词（收集所有信息并生成文档提示词，用于提交给大模型生成报告）")
     print("  --chain, -C <链>    指定链类型（可选）")
     print("                       支持的链: ethereum, bsc, polygon, arbitrum, optimism, avalanche, sui, solana")
     print("                       如果不指定，EVM地址会自动尝试所有EVM链")
@@ -1718,7 +2264,7 @@ def main():
     print()
     
     # 解析命令行参数
-    mode = None  # 'info', 'code', 'scan', 'llm'
+    mode = None  # 'info', 'code', 'mint', 'goplus', 'scan', 'llm'
     token_address = None
     chain = None
     
@@ -1731,6 +2277,10 @@ def main():
             mode = 'info'
         elif arg in ['--code', '-c']:
             mode = 'code'
+        elif arg in ['--mint', '-m']:
+            mode = 'mint'
+        elif arg in ['--goplus', '-g']:
+            mode = 'goplus'
         elif arg in ['--scan', '-s']:
             mode = 'scan'
         elif arg in ['--llm', '-l']:
@@ -1763,6 +2313,8 @@ def main():
         print("示例:")
         print("  python3 main.py --info <地址>")
         print("  python3 main.py --code <地址>")
+        print("  python3 main.py --mint <地址>")
+        print("  python3 main.py --goplus <地址>")
         print("  python3 main.py --scan <地址>")
         print("  python3 main.py --llm <地址>")
         sys.exit(1)
@@ -1771,7 +2323,7 @@ def main():
     if not mode:
         print_usage()
         print()
-        print("错误: 必须指定一个选项 (--info, --code, --scan, 或 --llm)")
+        print("错误: 必须指定一个选项 (--info, --code, --mint, --goplus, --scan, 或 --llm)")
         sys.exit(1)
     
     print()
@@ -1781,6 +2333,10 @@ def main():
         query_token_info_only(token_address, chain)
     elif mode == 'code':
         export_code_package(token_address, chain)
+    elif mode == 'mint':
+        query_mint_analysis(token_address, chain)
+    elif mode == 'goplus':
+        query_goplus_info(token_address, chain)
     elif mode == 'scan':
         scan_token_security(token_address, chain)
     elif mode == 'llm':

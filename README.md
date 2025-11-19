@@ -47,12 +47,14 @@ python3 main.py --help
 
 #### 命令行选项
 
-- `--info, -i`: 显示代币基础信息（不包含代码）
-- `--code, -c`: 生成代币代码压缩包（EVM和Sui，不包括Solana）
+- `--info, -i`: 显示代币基础信息（来自区块链浏览器）
+- `--mint, -m`: 显示Mint功能分析（铸造形式、最大值限制、权限控制）
+- `--goplus, -g`: 显示GoPlus Labs安全信息
 - `--scan, -s`: 显示安全扫描信息
   - ETH: 模式匹配扫描结果 + GoPlus
   - SUI: Sui扫描脚本结果 + GoPlus
   - Solana: GoPlus结果
+- `--code, -c`: 生成代币代码压缩包（EVM和Sui，不包括Solana）
 - `--llm, -l`: 生成LLM提示词（收集所有信息并生成文档提示词）
 - `--chain, -C <链>`: 指定链类型（可选）
   - 支持的链: ethereum, bsc, polygon, arbitrum, optimism, avalanche, sui, solana
@@ -77,7 +79,30 @@ python3 main.py --info 0x03cd711c02597eba9e20f04cb8eee214c23229605faaaa717eafbbb
 python3 main.py --info EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --chain solana
 ```
 
-#### 2. 生成代码压缩包
+#### 2. Mint功能分析
+
+```bash
+# Ethereum
+python3 main.py --mint 0xC477B6dfd26EC2460b3b92de18837Fd476Ea7549 --chain eth
+
+# BSC
+python3 main.py --mint 0x40b8129B786D766267A7a118cF8C07E31CDB6Fde --chain bsc
+
+# Sui
+python3 main.py --mint 0x03cd711c02597eba9e20f04cb8eee214c23229605faaaa717eafbbbdee55ccfb::lineup::LINEUP --chain sui
+```
+
+#### 3. GoPlus Labs安全信息
+
+```bash
+# Ethereum
+python3 main.py --goplus 0xdAC17F958D2ee523a2206206994597C13D831ec7
+
+# Solana
+python3 main.py --goplus EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --chain solana
+```
+
+#### 4. 生成代码压缩包
 
 ```bash
 # Ethereum
@@ -90,7 +115,7 @@ python3 main.py --code 0x55d398326f99059fF775485246999027B3197955 --chain bsc
 python3 main.py --code 0x03cd711c02597eba9e20f04cb8eee214c23229605faaaa717eafbbbdee55ccfb
 ```
 
-#### 3. 安全扫描
+#### 5. 安全扫描
 
 ```bash
 # Ethereum (模式匹配扫描 + GoPlus)
@@ -106,7 +131,7 @@ python3 main.py --scan 0x03cd711c02597eba9e20f04cb8eee214c23229605faaaa717eafbbb
 python3 main.py --scan EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --chain solana
 ```
 
-#### 4. 生成LLM提示词
+#### 6. 生成LLM提示词
 
 ```bash
 # 收集所有信息并生成LLM提示词
@@ -173,9 +198,24 @@ token-query-tool/
         └── formatters.py
 ```
 
+## 测试
+
+项目包含综合测试脚本，可以测试所有链的所有功能：
+
+```bash
+# 运行完整测试
+python3 test_all_features.py
+```
+
+测试脚本会：
+- 遍历所有支持的链（Ethereum, BSC, Polygon, Sui, Solana等）
+- 测试所有功能（info, mint, goplus, scan, code, llm）
+- 生成详细的测试报告和统计信息
+
 ## 注意事项
 
 - 代码获取功能**无需API key**，直接从网页或RPC获取
 - EVM链会自动尝试所有支持的链（如果未指定）
 - 安全扫描使用模式匹配，无需编译，无需外部依赖
 - 生成的代码压缩包和LLM提示词会保存在当前目录
+- Mint功能分析会检测铸造形式、最大值限制和权限控制

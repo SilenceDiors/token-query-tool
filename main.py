@@ -5,6 +5,12 @@
 """
 import sys
 import os
+import warnings
+
+# 抑制 urllib3 的 OpenSSL 警告
+warnings.filterwarnings('ignore', category=UserWarning, module='urllib3')
+warnings.filterwarnings('ignore', message='.*urllib3 v2 only supports OpenSSL.*')
+warnings.filterwarnings('ignore', message='.*NotOpenSSLWarning.*')
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

@@ -1,5 +1,9 @@
 requests>=2.28.0
 web3>=6.0.0
+eth-account>=0.13.6
+eth-abi>=5.0.1
+hexbytes>=1.2.0
+eth-utils>=2.0.0
 # 可选：用于 Solana BPF 字节码反汇编
 # capstone>=5.0.0
 # 可选：用于 EVM 智能合约安全扫描（包含自动安装 solc 功能）

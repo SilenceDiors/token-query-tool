@@ -458,12 +458,61 @@ def get_sui_move_code_from_cli(package_address: str) -> Optional[str]:
     return None
 
 
+def validate_sui_address(token_address: str) -> tuple[bool, Optional[str]]:
+    """
+    验证Sui地址格式
+    返回: (is_valid, error_message)
+    """
+    token_address = token_address.strip()
+    
+    # Sui地址格式：
+    # 1. Package地址或对象地址: 0x开头，66字符（0x + 64个十六进制字符）
+    # 2. 完整类型: 0x...::module::Type
+    if "::" in token_address:
+        # 完整类型格式，提取package地址部分
+        parts = token_address.split("::")
+        if len(parts) < 3:
+            return False, "Sui类型格式错误：应为 0x...::module::Type"
+        package_part = parts[0]
+        if not package_part.startswith("0x"):
+            return False, "Sui地址格式错误：package地址必须以 0x 开头"
+        if len(package_part) != 66:
+            return False, f"Sui package地址长度错误：应为 66 字符（当前 {len(package_part)} 字符）"
+        # 验证十六进制
+        try:
+            int(package_part[2:], 16)
+        except ValueError:
+            return False, "Sui地址格式错误：包含无效的十六进制字符"
+        return True, None
+    else:
+        # 单独的地址格式
+        if not token_address.startswith("0x"):
+            return False, "Sui地址格式错误：必须以 0x 开头"
+        if len(token_address) != 66:
+            return False, f"Sui地址长度错误：应为 66 字符（当前 {len(token_address)} 字符）"
+        # 验证十六进制
+        try:
+            int(token_address[2:], 16)
+        except ValueError:
+            return False, "Sui地址格式错误：包含无效的十六进制字符"
+        return True, None
+
+
 def get_sui_move_code(token_address: str) -> Optional[Dict[str, Any]]:
     """
     获取Sui Move模块源代码
     返回: dict包含Move模块源代码信息
     优化：优先使用最快的 RPC 方法，并行处理
     """
+    # 先验证地址格式
+    is_valid, error_msg = validate_sui_address(token_address)
+    if not is_valid:
+        return {
+            "verified": False,
+            "message": error_msg or "Sui地址格式错误",
+            "note": f"请检查地址是否正确：{token_address}\n   Sui地址格式应为：0x...（66字符）或 0x...::module::Type"
+        }
+    
     rpc_url = RPC_ENDPOINTS["sui"]
     
     # 从token地址中提取package地址
@@ -608,12 +657,43 @@ def get_sui_move_code(token_address: str) -> Optional[Dict[str, Any]]:
                     module_info, package_address, module_name
                 )
         else:
-            # 如果都失败了
-            return {
-                "verified": False,
-                "message": "无法获取Move模块信息",
-                "note": "该地址可能不是有效的package地址"
-            }
+            # 如果都失败了，检查具体原因
+            error_details = []
+            if object_result and "error" in object_result:
+                error_code = object_result["error"].get("code", "")
+                error_msg = object_result["error"].get("message", "")
+                if "not found" in error_msg.lower() or "does not exist" in error_msg.lower():
+                    return {
+                        "verified": False,
+                        "message": "地址不存在或无效",
+                        "note": f"该Sui地址不存在：{package_address}\n   请检查地址是否正确"
+                    }
+                error_details.append(f"RPC错误: {error_msg}")
+            
+            if normalized_result and "error" in normalized_result:
+                error_code = normalized_result["error"].get("code", "")
+                error_msg = normalized_result["error"].get("message", "")
+                if "not found" in error_msg.lower() or "does not exist" in error_msg.lower():
+                    return {
+                        "verified": False,
+                        "message": "地址不存在或无效",
+                        "note": f"该Sui package地址不存在：{package_address}\n   请检查地址是否正确"
+                    }
+                error_details.append(f"RPC错误: {error_msg}")
+            
+            # 如果没有任何错误信息，说明地址存在但没有代码
+            if not error_details:
+                return {
+                    "verified": False,
+                    "message": "无法获取Move模块信息",
+                    "note": f"该地址可能不是有效的package地址，或package中不包含Move模块\n   地址: {package_address}"
+                }
+            else:
+                return {
+                    "verified": False,
+                    "message": "无法获取Move模块信息",
+                    "note": f"RPC请求失败: {'; '.join(error_details)}"
+                }
         
         # 返回成功结果
         return {

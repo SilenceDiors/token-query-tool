@@ -159,11 +159,45 @@ def analyze_bpf_bytecode(bytecode_hex: str, bytecode_bytes: Optional[bytes] = No
     return analysis
 
 
+def validate_solana_address(token_address: str) -> tuple[bool, Optional[str]]:
+    """
+    验证Solana地址格式
+    返回: (is_valid, error_message)
+    """
+    token_address = token_address.strip()
+    
+    # Solana地址格式：base58编码，长度约32-44字符，不以0x开头
+    if token_address.startswith("0x"):
+        return False, "Solana地址格式错误：不应以 0x 开头（Solana使用base58编码）"
+    
+    if len(token_address) < 32:
+        return False, f"Solana地址格式错误：长度过短（当前 {len(token_address)} 字符，应为32-44字符）"
+    
+    if len(token_address) > 44:
+        return False, f"Solana地址格式错误：长度过长（当前 {len(token_address)} 字符，应为32-44字符）"
+    
+    # 验证是否为有效的base58字符
+    base58_chars = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    if not all(c in base58_chars for c in token_address):
+        return False, "Solana地址格式错误：包含无效的base58字符"
+    
+    return True, None
+
+
 def get_solana_program_code(token_address: str) -> Optional[Dict[str, Any]]:
     """
     获取Solana程序代码（账户数据）
     返回: dict包含程序账户数据信息
     """
+    # 先验证地址格式
+    is_valid, error_msg = validate_solana_address(token_address)
+    if not is_valid:
+        return {
+            "verified": False,
+            "message": error_msg or "Solana地址格式错误",
+            "note": f"请检查地址是否正确：{token_address}\n   Solana地址应为base58编码，长度32-44字符"
+        }
+    
     rpc_url = RPC_ENDPOINTS["solana"]
     
     payload = {
@@ -183,12 +217,36 @@ def get_solana_program_code(token_address: str) -> Optional[Dict[str, Any]]:
         response.raise_for_status()
         result = response.json()
         
+        # 检查RPC错误
+        if result and "error" in result:
+            error_code = result["error"].get("code", "")
+            error_msg = result["error"].get("message", "")
+            if "invalid" in error_msg.lower() or "not found" in error_msg.lower():
+                return {
+                    "verified": False,
+                    "message": "地址不存在或无效",
+                    "note": f"该Solana地址不存在：{token_address}\n   请检查地址是否正确"
+                }
+            return {
+                "verified": False,
+                "message": f"RPC请求失败: {error_msg}",
+                "error": str(result["error"])
+            }
+        
         if result and "result" in result and result["result"]:
             account_info = result["result"]["value"]
             if account_info:
                 data = account_info.get("data", [])
                 executable = account_info.get("executable", False)
                 owner = account_info.get("owner", "")
+                
+                # 检查是否是可执行程序
+                if not executable:
+                    return {
+                        "verified": False,
+                        "message": "该地址不是程序账户",
+                        "note": f"该Solana地址存在但不是可执行程序账户\n   地址: {token_address}\n   如需查询代币信息，请使用代币账户地址"
+                    }
                 
                 if isinstance(data, list) and len(data) > 0:
                     # data[0] 是 base64 编码的程序数据
@@ -227,8 +285,15 @@ def get_solana_program_code(token_address: str) -> Optional[Dict[str, Any]]:
         
         return {
             "verified": False,
-            "message": "无法获取程序账户信息",
-            "note": "该地址可能不是有效的程序账户"
+            "message": "地址不存在或无效",
+            "note": f"该Solana地址不存在：{token_address}\n   请检查地址是否正确"
+        }
+    except requests.exceptions.RequestException as e:
+        return {
+            "verified": False,
+            "message": f"网络请求失败: {e}",
+            "error": str(e),
+            "note": "请检查网络连接或Solana RPC节点是否可用"
         }
     except Exception as e:
         return {
