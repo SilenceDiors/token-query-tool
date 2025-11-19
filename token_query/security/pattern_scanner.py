@@ -716,8 +716,8 @@ def _analyze_mint_functionality(lines: List[str]) -> Optional[Dict[str, Any]]:
             constructor_line = i
             constructor_code_lines = [line]
         
-        # 检测mint函数
-        if re.search(r'function\s+mint', stripped, re.IGNORECASE):
+        # 检测mint函数（包括公开的mint和内部的_mint）
+        if re.search(r'function\s+(?:public\s+|external\s+|internal\s+|private\s+)?(?:mint|_mint)\s*\(', stripped, re.IGNORECASE):
             mint_info["has_mint"] = True
             mint_info["mint_function_exists"] = True
             mint_function_line = i
