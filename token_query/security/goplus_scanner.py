@@ -349,5 +349,51 @@ def format_goplus_results(security_info: Dict[str, Any]) -> str:
     output_lines.append("提示: 以上信息由 GoPlus Labs 提供，仅供参考")
     output_lines.append("   更多信息: https://gopluslabs.io/token-security")
     
+    # Mint功能分析（从GoPlus API数据推断，在最后显示）
+    mint_analysis = _analyze_mint_from_goplus(security_info)
+    if mint_analysis:
+        output_lines.append("")
+        output_lines.append("╔══════════════════════════════════════════════════════════════════════════════╗")
+        output_lines.append("║                      Mint功能分析                                        ║")
+        output_lines.append("╠══════════════════════════════════════════════════════════════════════════════╣")
+        output_lines.append(f"║  铸造形式: {mint_analysis.get('mint_type', '未知')}")
+        output_lines.append(f"║  最大值限制: {mint_analysis.get('max_supply', '未知')}")
+        output_lines.append(f"║  权限控制: {mint_analysis.get('access_control', '未知')}")
+        output_lines.append("╚══════════════════════════════════════════════════════════════════════════════╝")
+    
     return "\n".join(output_lines)
+
+
+def _analyze_mint_from_goplus(security_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    从GoPlus API数据中分析mint功能
+    对于无法读取源代码的链（如Solana），使用GoPlus API数据推断
+    """
+    is_mintable = _parse_bool(security_info.get("is_mintable"))
+    total_supply = _parse_int(security_info.get("total_supply"))
+    
+    if is_mintable is None:
+        return None
+    
+    # 如果不可增发，说明是固定供应量
+    if not is_mintable:
+        return {
+            "mint_type": "仅部署时一次性铸造（固定供应量）",
+            "max_supply": "固定供应量，无法增发",
+            "access_control": "不适用（不可增发）"
+        }
+    
+    # 如果可增发，尝试从其他字段推断
+    # 检查是否有最大供应量信息（GoPlus API可能不直接提供，但可以从其他字段推断）
+    max_supply_info = "无限制（从GoPlus API无法确定）"
+    
+    # 检查是否有其他相关字段
+    # 注意：GoPlus API可能不提供最大供应量信息，这里只能基于is_mintable推断
+    access_control_info = "无法确定（需要查看源代码）"
+    
+    return {
+        "mint_type": "运行态可铸造（GoPlus检测到可增发）",
+        "max_supply": max_supply_info,
+        "access_control": access_control_info
+    }
 

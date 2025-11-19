@@ -84,6 +84,11 @@ def scan_with_patterns(source_code: str) -> List[Dict[str, Any]]:
     # 20. 检查函数返回值未使用
     issues.extend(_check_unused_return_value(lines))
     
+    # 21. 分析mint功能
+    mint_analysis = _analyze_mint_functionality(lines)
+    if mint_analysis:
+        issues.append(mint_analysis)
+    
     return issues
 
 
@@ -632,6 +637,124 @@ def _check_unused_return_value(lines: List[str]) -> List[Dict[str, Any]]:
     return issues
 
 
+def _analyze_mint_functionality(lines: List[str]) -> Optional[Dict[str, Any]]:
+    """分析mint功能：形式、最大值限制、一次性vs运行态铸造"""
+    mint_info = {
+        "has_mint": False,
+        "mint_in_constructor": False,
+        "mint_function_exists": False,
+        "has_max_supply": False,
+        "max_supply_value": None,
+        "mint_function_line": None,
+        "constructor_mint_line": None,
+        "mint_access_control": False
+    }
+    
+    in_constructor = False
+    in_mint_function = False
+    constructor_line = 0
+    mint_function_line = 0
+    
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        
+        # 检测构造函数
+        if re.search(r'constructor\s*\(', stripped):
+            in_constructor = True
+            constructor_line = i
+        
+        # 检测mint函数
+        if re.search(r'function\s+mint', stripped, re.IGNORECASE):
+            mint_info["has_mint"] = True
+            mint_info["mint_function_exists"] = True
+            mint_function_line = i
+            mint_info["mint_function_line"] = i
+            in_mint_function = True
+            
+            # 检查权限控制
+            if 'onlyOwner' in stripped or 'onlyRole' in stripped or 'modifier' in stripped:
+                mint_info["mint_access_control"] = True
+        
+        # 在构造函数中查找mint调用
+        if in_constructor:
+            if 'mint(' in stripped or '_mint(' in stripped:
+                mint_info["has_mint"] = True
+                mint_info["mint_in_constructor"] = True
+                mint_info["constructor_mint_line"] = i
+            if stripped == '}' or (stripped.endswith('}') and '{' not in stripped):
+                in_constructor = False
+        
+        # 在mint函数中查找权限控制
+        if in_mint_function:
+            if 'onlyOwner' in stripped or 'onlyRole' in stripped or 'require(' in stripped:
+                if 'msg.sender' in stripped or 'owner' in stripped.lower():
+                    mint_info["mint_access_control"] = True
+            if stripped == '}' or (stripped.endswith('}') and '{' not in stripped):
+                in_mint_function = False
+        
+        # 查找最大供应量限制
+        if re.search(r'(maxSupply|max_supply|MAX_SUPPLY|cap|CAP)', stripped, re.IGNORECASE):
+            mint_info["has_max_supply"] = True
+            # 尝试提取数值
+            num_match = re.search(r'(\d+)', stripped)
+            if num_match:
+                mint_info["max_supply_value"] = num_match.group(1)
+        
+        # 查找totalSupply检查
+        if 'totalSupply' in stripped and ('<=' in stripped or '<' in stripped or 'require' in stripped):
+            mint_info["has_max_supply"] = True
+    
+    if not mint_info["has_mint"]:
+        return None
+    
+    # 构建分析结果
+    mint_type = "未知"
+    if mint_info["mint_in_constructor"] and not mint_info["mint_function_exists"]:
+        mint_type = "仅部署时一次性铸造"
+    elif mint_info["mint_in_constructor"] and mint_info["mint_function_exists"]:
+        mint_type = "部署时铸造 + 运行态可铸造"
+    elif mint_info["mint_function_exists"]:
+        mint_type = "运行态可铸造"
+    
+    max_supply_info = "无限制"
+    if mint_info["has_max_supply"]:
+        if mint_info["max_supply_value"]:
+            max_supply_info = f"有最大值限制: {mint_info['max_supply_value']}"
+        else:
+            max_supply_info = "有最大值限制（具体值需查看代码）"
+    
+    access_control_info = "有权限控制" if mint_info["mint_access_control"] else "缺少权限控制"
+    
+    description = f"铸造形式: {mint_type}\n"
+    description += f"最大值限制: {max_supply_info}\n"
+    description += f"权限控制: {access_control_info}"
+    
+    if mint_info["mint_function_line"]:
+        line_num = mint_info["mint_function_line"]
+    elif mint_info["constructor_mint_line"]:
+        line_num = mint_info["constructor_mint_line"]
+    else:
+        line_num = 0
+    
+    severity = "HIGH" if not mint_info["mint_access_control"] else "INFO"
+    
+    return {
+        "severity": severity,
+        "title": "Mint功能分析",
+        "description": description,
+        "line": line_num,
+        "mint_analysis": {
+            "mint_type": mint_type,
+            "max_supply": max_supply_info,
+            "access_control": access_control_info,
+            "has_max_supply": mint_info["has_max_supply"],
+            "mint_in_constructor": mint_info["mint_in_constructor"],
+            "mint_function_exists": mint_info["mint_function_exists"]
+        },
+        "recommendation": "确认mint权限控制和最大供应量限制是否符合预期"
+    }
+
+
 def format_pattern_scan_results(issues: List[Dict[str, Any]]) -> str:
     """
     格式化模式匹配扫描结果
@@ -663,12 +786,34 @@ def format_pattern_scan_results(issues: List[Dict[str, Any]]) -> str:
     output_lines.append(f"║  低危 (LOW): {len(low)}")
     output_lines.append("╚══════════════════════════════════════════════════════════════════════════════╝")
     output_lines.append("")
+    
+    # 提取mint分析信息（如果有）
+    mint_analysis = None
+    other_issues = []
+    for issue in issues:
+        if issue.get('title') == 'Mint功能分析':
+            mint_analysis = issue
+        else:
+            other_issues.append(issue)
+    
+    # 如果有mint分析，优先显示
+    if mint_analysis:
+        output_lines.append("╔══════════════════════════════════════════════════════════════════════════════╗")
+        output_lines.append("║                      Mint功能分析                                        ║")
+        output_lines.append("╠══════════════════════════════════════════════════════════════════════════════╣")
+        mint_data = mint_analysis.get('mint_analysis', {})
+        output_lines.append(f"║  铸造形式: {mint_data.get('mint_type', '未知')}")
+        output_lines.append(f"║  最大值限制: {mint_data.get('max_supply', '未知')}")
+        output_lines.append(f"║  权限控制: {mint_data.get('access_control', '未知')}")
+        output_lines.append("╚══════════════════════════════════════════════════════════════════════════════╝")
+        output_lines.append("")
+    
     output_lines.append("详细问题列表:")
     output_lines.append("─" * 80)
     output_lines.append("")
     
-    # 按严重程度排序显示
-    all_issues = critical + high + medium + low
+    # 按严重程度排序显示（排除mint分析，因为已经单独显示）
+    all_issues = [i for i in (critical + high + medium + low) if i.get('title') != 'Mint功能分析']
     
     for idx, issue in enumerate(all_issues, 1):
         severity = issue.get('severity', 'UNKNOWN')
