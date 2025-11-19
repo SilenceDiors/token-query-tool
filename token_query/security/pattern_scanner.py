@@ -716,14 +716,19 @@ def _analyze_mint_functionality(lines: List[str]) -> Optional[Dict[str, Any]]:
             constructor_line = i
             constructor_code_lines = [line]
         
-        # 检测mint函数（包括公开的mint和内部的_mint）
-        if re.search(r'function\s+(?:public\s+|external\s+|internal\s+|private\s+)?(?:mint|_mint)\s*\(', stripped, re.IGNORECASE):
-            mint_info["has_mint"] = True
-            mint_info["mint_function_exists"] = True
-            mint_function_line = i
-            mint_info["mint_function_line"] = i
-            in_mint_function = True
-            mint_function_code_lines = [line]
+        # 检测公开的mint函数（不包括内部的_mint，_mint是标准实现）
+        # _mint通常是ERC20标准内部函数，用于实际铸造逻辑
+        # 公开的mint函数才是我们关心的可调用接口
+        mint_match = re.search(r'function\s+(?:public\s+|external\s+)?mint\s*\(', stripped, re.IGNORECASE)
+        if mint_match:
+            # 排除内部/私有函数
+            if 'internal' not in stripped.lower() and 'private' not in stripped.lower():
+                mint_info["has_mint"] = True
+                mint_info["mint_function_exists"] = True
+                mint_function_line = i
+                mint_info["mint_function_line"] = i
+                in_mint_function = True
+                mint_function_code_lines = [line]
             
             # 智能检测权限控制 - 不仅基于关键词，还分析函数签名和上下文
             # 1. 检查函数签名中的修饰符（排除注释和字符串）
