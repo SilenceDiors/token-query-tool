@@ -368,7 +368,8 @@ def _check_unprotected_functions(lines: List[str]) -> List[Dict[str, Any]]:
                         has_modifier = True
                     else:
                         # 检查函数名是否暗示需要保护
-                        if any(keyword in current_function.lower() for keyword in ['transfer', 'withdraw', 'mint', 'burn', 'pause', 'unpause', 'set']):
+                # 排除以下划线开头的函数（标准实现，如 _mint, _transfer, _burn 等）
+                        if not current_function.startswith('_') and any(keyword in current_function.lower() for keyword in ['transfer', 'withdraw', 'mint', 'burn', 'pause', 'unpause', 'set']):
                             issues.append({
                                 'severity': 'MEDIUM',
                                 'title': f'未受保护的关键函数: {current_function}',
