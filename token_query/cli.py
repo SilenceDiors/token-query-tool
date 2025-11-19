@@ -1590,10 +1590,10 @@ def query_mint_analysis(token_address: str, chain: Optional[str] = None):
                     print("Mint功能分析（基于GoPlus Labs数据）")
                     print_separator()
                     print()
-                    mint_data = mint_analysis.get('mint_analysis', {})
-                    print(f"铸造形式: {mint_data.get('mint_type', '未知')}")
-                    print(f"最大值限制: {mint_data.get('max_supply', '未知')}")
-                    print(f"权限控制: {mint_data.get('access_control', '未知')}")
+                    # _analyze_mint_from_goplus 直接返回 mint 数据字典，不是嵌套的
+                    print(f"铸造形式: {mint_analysis.get('mint_type', '未知')}")
+                    print(f"最大值限制: {mint_analysis.get('max_supply', '未知')}")
+                    print(f"权限控制: {mint_analysis.get('access_control', '未知')}")
                 else:
                     print("   无法从GoPlus获取Mint信息")
             elif error_msg:

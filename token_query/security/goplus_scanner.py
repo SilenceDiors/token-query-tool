@@ -369,11 +369,41 @@ def _analyze_mint_from_goplus(security_info: Dict[str, Any]) -> Optional[Dict[st
     从GoPlus API数据中分析mint功能
     对于无法读取源代码的链（如Solana），使用GoPlus API数据推断
     """
-    is_mintable = _parse_bool(security_info.get("is_mintable"))
-    total_supply = _parse_int(security_info.get("total_supply"))
+    # 处理不同链的格式差异
+    # EVM链使用 is_mintable 字段（字符串 "0"/"1"）
+    # Solana使用 mintable 字段（对象，包含 status 和 authority）
+    is_mintable = None
+    access_control_info = "无法确定（需要查看源代码）"  # 默认值
+    
+    if "is_mintable" in security_info:
+        # EVM链格式
+        is_mintable = _parse_bool(security_info.get("is_mintable"))
+    elif "mintable" in security_info:
+        # Solana格式
+        mintable_info = security_info.get("mintable")
+        if isinstance(mintable_info, dict):
+            # 从 status 字段判断
+            status = mintable_info.get("status")
+            is_mintable = _parse_bool(status)
+            
+            # 提取权限信息
+            authority = mintable_info.get("authority", [])
+            if authority and isinstance(authority, list) and len(authority) > 0:
+                authority_addresses = [auth.get("address", "") if isinstance(auth, dict) else str(auth) for auth in authority]
+                if authority_addresses:
+                    access_control_info = f"权限控制地址: {', '.join(authority_addresses)}"
+                else:
+                    access_control_info = "有权限控制（具体地址未知）"
+            else:
+                access_control_info = "无权限控制（任何人都可以铸造）"
+        else:
+            # 如果不是字典，尝试直接解析
+            is_mintable = _parse_bool(mintable_info)
     
     if is_mintable is None:
         return None
+    
+    total_supply = _parse_int(security_info.get("total_supply"))
     
     # 如果不可增发，说明是固定供应量
     if not is_mintable:
@@ -386,10 +416,6 @@ def _analyze_mint_from_goplus(security_info: Dict[str, Any]) -> Optional[Dict[st
     # 如果可增发，尝试从其他字段推断
     # 检查是否有最大供应量信息（GoPlus API可能不直接提供，但可以从其他字段推断）
     max_supply_info = "无限制（从GoPlus API无法确定）"
-    
-    # 检查是否有其他相关字段
-    # 注意：GoPlus API可能不提供最大供应量信息，这里只能基于is_mintable推断
-    access_control_info = "无法确定（需要查看源代码）"
     
     return {
         "mint_type": "运行态可铸造（GoPlus检测到可增发）",
