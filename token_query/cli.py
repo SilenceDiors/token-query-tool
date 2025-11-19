@@ -573,11 +573,18 @@ def query_token_universal(token_address: str, chain: Optional[str] = None, inclu
     total_supply = token_info.get('totalSupply')
     decimals = token_info.get('decimals', 0)
     
-    if total_supply:
+    if total_supply is not None:
         formatted_supply = format_supply(total_supply, decimals)
         supply_info = [
             ["总供应量", f"{formatted_supply} {token_info.get('symbol', 'TOKEN')}"],
             ["原始值", str(total_supply)]
+        ]
+        print_table(supply_info, ["字段", "值"])
+        print()
+    else:
+        # 如果无法获取总供应量，显示提示信息
+        supply_info = [
+            ["总供应量", "无法获取（可能是 regulated currency 或其他机制）"]
         ]
         print_table(supply_info, ["字段", "值"])
         print()
@@ -783,11 +790,18 @@ def query_token_info_only(token_address: str, chain: Optional[str] = None):
     total_supply = token_info.get('totalSupply')
     decimals = token_info.get('decimals', 0)
     
-    if total_supply:
+    if total_supply is not None:
         formatted_supply = format_supply(total_supply, decimals)
         supply_info = [
             ["总供应量", f"{formatted_supply} {token_info.get('symbol', 'TOKEN')}"],
             ["原始值", str(total_supply)]
+        ]
+        print_table(supply_info, ["字段", "值"])
+        print()
+    else:
+        # 如果无法获取总供应量，显示提示信息
+        supply_info = [
+            ["总供应量", "无法获取（可能是 regulated currency 或其他机制）"]
         ]
         print_table(supply_info, ["字段", "值"])
         print()
@@ -960,7 +974,10 @@ def generate_llm_prompt(token_address: str, chain_type: str, chain_name: str,
         if chain_type == "evm":
             # EVM 模式匹配扫描结果
             if isinstance(scan_results, list):
-                for issue in scan_results:
+                # 过滤掉 LOW 级别的漏洞
+                filtered_scan_results = [i for i in scan_results if i.get('severity') != 'LOW']
+                
+                for issue in filtered_scan_results:
                     if issue.get('title') == 'Mint功能分析':
                         mint_analysis = issue
                     else:
@@ -1084,7 +1101,7 @@ def generate_llm_prompt(token_address: str, chain_type: str, chain_name: str,
                 prompt_parts.append(f"  - 严重 (CRITICAL): {summary.get('critical', 0)}")
                 prompt_parts.append(f"  - 高危 (HIGH): {summary.get('high', 0)}")
                 prompt_parts.append(f"  - 中危 (MEDIUM): {summary.get('medium', 0)}")
-                prompt_parts.append(f"  - 低危 (LOW): {summary.get('low', 0)}")
+                # 不再显示 LOW 级别
                 prompt_parts.append(f"  - 信息 (INFO): {summary.get('info', 0)}")
                 prompt_parts.append("")
                 
@@ -1502,6 +1519,14 @@ def query_mint_analysis(token_address: str, chain: Optional[str] = None):
         print("正在获取合约代码...")
         code_info = get_sui_move_code(token_address)
         
+        # 先获取代币信息（包括小数位）
+        token_info = None
+        try:
+            from token_query.chains.sui import query_sui_token
+            token_info = query_sui_token(token_address)
+        except Exception as e:
+            print(f"   获取代币信息失败（将仅从代码分析）: {e}")
+        
         if code_info and code_info.get("verified", False):
             source_code = code_info.get("source_code", {})
             package_address = code_info.get("package_address", token_address)
@@ -1510,7 +1535,8 @@ def query_mint_analysis(token_address: str, chain: Optional[str] = None):
                 from token_query.security import scan_sui_move_code
                 
                 if isinstance(source_code, dict) and code_info.get("format") == "move_source":
-                    scan_results = scan_sui_move_code(source_code, package_address)
+                    # 传递 token_info 给扫描函数，以便使用 decimals
+                    scan_results = scan_sui_move_code(source_code, package_address, token_info=token_info)
                     if isinstance(scan_results, dict):
                         issues = scan_results.get("issues", [])
                         mint_analysis = None
@@ -1568,11 +1594,60 @@ def query_mint_analysis(token_address: str, chain: Optional[str] = None):
                                 print(mint_data.get('max_supply_code_snippet'))
                                 print("```")
                         else:
-                            print("   未检测到Mint功能")
+                            # 如果代码扫描未找到 mint，尝试从 GoPlus 获取
+                            print("   代码扫描未检测到Mint功能，尝试从GoPlus Labs获取...")
+                            try:
+                                from token_query.security import get_token_security_info
+                                from token_query.security.goplus_scanner import _analyze_mint_from_goplus
+                                goplus_info, error_msg = get_token_security_info(token_address, chain_name)
+                                if goplus_info:
+                                    mint_analysis = _analyze_mint_from_goplus(goplus_info)
+                                    if mint_analysis:
+                                        print()
+                                        print_separator()
+                                        print("Mint功能分析（基于GoPlus Labs数据）")
+                                        print_separator()
+                                        print()
+                                        print(f"铸造形式: {mint_analysis.get('mint_type', '未知')}")
+                                        print(f"最大值限制: {mint_analysis.get('max_supply', '未知')}")
+                                        print(f"权限控制: {mint_analysis.get('access_control', '未知')}")
+                                    else:
+                                        print("   无法从GoPlus获取Mint信息")
+                                elif error_msg:
+                                    print(f"   {error_msg}")
+                                else:
+                                    print("   无法获取 GoPlus 安全信息")
+                            except Exception as e2:
+                                print(f"   从GoPlus获取失败: {e2}")
             except Exception as e:
                 print(f"   分析失败: {e}")
         else:
             print("无法获取合约代码")
+            # 如果无法获取代码，尝试从 GoPlus 获取
+            print("   尝试从GoPlus Labs获取Mint信息...")
+            try:
+                from token_query.security import get_token_security_info
+                from token_query.security.goplus_scanner import _analyze_mint_from_goplus
+                goplus_info, error_msg = get_token_security_info(token_address, chain_name)
+                if goplus_info:
+                    mint_analysis = _analyze_mint_from_goplus(goplus_info)
+                    if mint_analysis:
+                        print()
+                        print_separator()
+                        print("Mint功能分析（基于GoPlus Labs数据）")
+                        print_separator()
+                        print()
+                        print(f"铸造形式: {mint_analysis.get('mint_type', '未知')}")
+                        print(f"最大值限制: {mint_analysis.get('max_supply', '未知')}")
+                        print(f"权限控制: {mint_analysis.get('access_control', '未知')}")
+                    else:
+                        print("   无法从GoPlus获取Mint信息")
+                elif error_msg:
+                    print(f"   {error_msg}")
+                else:
+                    print("   无法获取 GoPlus 安全信息")
+            except Exception as e2:
+                print(f"   从GoPlus获取失败: {e2}")
     
     elif chain_type == "solana":
         # Solana 无法读取代码，从GoPlus获取

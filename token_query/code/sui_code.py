@@ -24,9 +24,10 @@ def convert_disassembled_to_readable_source(disassembled_code: str, package_addr
     in_init = False
     brace_count = 0
     
-    # 提取模块名
+    # 提取模块名和类型名
     module_match = re.search(r'module\s+([^\s{]+)', disassembled_code)
     module_name = None
+    type_name = "LINEUP"  # 默认类型名
     if module_match:
         raw_module = module_match.group(1).replace('.', '::')
         # 如果地址是短格式，转换为完整格式
@@ -35,14 +36,22 @@ def convert_disassembled_to_readable_source(disassembled_code: str, package_addr
             module_parts = raw_module.split('::')
             if len(module_parts) > 1:
                 module_name = f"{package_address}::{module_parts[-1]}"
+                # 提取类型名（通常是模块名的大写形式）
+                type_name = module_parts[-1].upper()
             else:
                 module_name = f"{package_address}::{raw_module}"
+                type_name = raw_module.upper()
         else:
             module_name = raw_module
+            # 从完整模块名中提取类型名
+            module_parts = raw_module.split('::')
+            if len(module_parts) > 1:
+                type_name = module_parts[-1].upper()
     
     if not module_name:
         # 默认使用 package_address::lineup
         module_name = f"{package_address}::lineup"
+        type_name = "LINEUP"
     
     # 提取 use 语句
     use_statements = []
@@ -75,48 +84,176 @@ def convert_disassembled_to_readable_source(disassembled_code: str, package_addr
         const_section = re.search(r'Constants\s*\[(.*?)\]', disassembled_code, re.DOTALL)
         if const_section:
             const_text = const_section.group(1)
-            # 提取常量值
-            const_matches = re.findall(r'(\d+)\s*=>\s*(.+?)(?=\d+\s*=>|$)', const_text, re.DOTALL)
+            # 提取常量值 - 改进正则表达式以匹配多行
+            const_matches = re.findall(r'(\d+)\s*=>\s*([^\n]+?)(?=\s*\d+\s*=>|\s*\]|$)', const_text, re.DOTALL)
             for idx, value in const_matches:
                 value = value.strip()
                 # 清理值
                 if 'u64:' in value:
-                    constants[idx] = value.split('u64:')[1].strip()
+                    # 提取 u64 值
+                    u64_match = re.search(r'u64:\s*(\d+)', value)
+                    if u64_match:
+                        constants[idx] = u64_match.group(1)
                 elif 'u8:' in value:
-                    constants[idx] = value.split('u8:')[1].strip()
+                    # 提取 u8 值
+                    u8_match = re.search(r'u8:\s*(\d+)', value)
+                    if u8_match:
+                        constants[idx] = u8_match.group(1)
                 elif 'vector<u8>:' in value:
                     str_value = re.search(r'"([^"]+)"', value)
                     if str_value:
                         constants[idx] = f'"{str_value.group(1)}"'
         
+        # 也从指令中提取常量（作为补充）
+        # 查找 LdConst 指令
+        ldconst_matches = re.findall(r'LdConst\[(\d+)\]\(([^)]+)\)', disassembled_code)
+        for const_idx, const_value in ldconst_matches:
+            if const_idx not in constants:  # 如果常量表中没有，使用指令中的值
+                if 'u64:' in const_value:
+                    u64_match = re.search(r'u64:\s*(\d+)', const_value)
+                    if u64_match:
+                        constants[const_idx] = u64_match.group(1)
+                elif 'u8:' in const_value:
+                    u8_match = re.search(r'u8:\s*(\d+)', const_value)
+                    if u8_match:
+                        constants[const_idx] = u8_match.group(1)
+        
         # 构建可读的 init 函数
-        init_code = "    fun init(arg0: LINEUP, arg1: &mut TxContext) {\n"
+        # 注意：不要使用模板化代码，应该从实际的 disassembled 代码中提取
+        # 如果代码不完整或无法准确提取，应该标记为不完整，而不是生成错误的模板代码
+        init_code = f"    fun init(arg0: {type_name}, arg1: &mut TxContext) {{\n"
         
         # 从字节码中提取关键操作
-        if 'new_currency_with_otw' in disassembled_code:
+        # 优先检查 create_currency（新 API）
+        has_create_currency = 'create_currency' in disassembled_code
+        has_create_regulated_currency = 'create_regulated_currency' in disassembled_code
+        has_new_currency = 'new_currency_with_otw' in disassembled_code
+        
+        if has_create_currency or has_create_regulated_currency:
+            # 从 Call 指令中提取参数
+            # 格式: Call coin::create_currency<ARTIS>(ARTIS, u8, vector<u8>, ...)
+            # 或: Call coin::create_regulated_currency<AUSD>(...)
+            create_match = re.search(r'Call\s+coin::(create_currency|create_regulated_currency)', disassembled_code)
+            if create_match:
+                # 查找常量中的 u8 值（小数位数）
+                decimals = '9'  # 默认值
+                # 查找常量表中的 u8 值
+                for idx, val in constants.items():
+                    if 'u8:' in str(val) or (isinstance(val, str) and val.isdigit() and int(val) < 256):
+                        if 'u8:' in str(val):
+                            decimals = str(val).split('u8:')[1].strip()
+                        else:
+                            decimals = str(val)
+                        break
+                
+                # 查找 mint_and_transfer 或 mint 调用
+                mint_amount = None
+                has_mint_and_transfer = 'mint_and_transfer' in disassembled_code.lower()
+                has_mint = 'coin::mint<' in disassembled_code
+                
+                # 查找 mint 调用前的 LdConst 或 LdU64 指令
+                lines = disassembled_code.split('\n')
+                for i, line in enumerate(lines):
+                    if has_mint_and_transfer and 'mint_and_transfer' in line.lower():
+                        # 向前查找 LdConst 或 LdU64 指令
+                        for j in range(max(0, i - 25), i):
+                            prev_line = lines[j]
+                            ldconst_match = re.search(r'LdConst\[(\d+)\]\(u64:\s*(\d+)\)', prev_line)
+                            if ldconst_match:
+                                mint_amount = ldconst_match.group(2)
+                                break
+                            ldu64_match = re.search(r'LdU64\((\d+)\)', prev_line)
+                            if ldu64_match:
+                                mint_amount = ldu64_match.group(1)
+                                break
+                        if mint_amount:
+                            break
+                    elif has_mint and 'coin::mint<' in line and 'mint_and_transfer' not in line.lower():
+                        # 向前查找 LdConst 或 LdU64 指令
+                        for j in range(max(0, i - 25), i):
+                            prev_line = lines[j]
+                            ldconst_match = re.search(r'LdConst\[(\d+)\]\(u64:\s*(\d+)\)', prev_line)
+                            if ldconst_match:
+                                mint_amount = ldconst_match.group(2)
+                                break
+                            ldu64_match = re.search(r'LdU64\((\d+)\)', prev_line)
+                            if ldu64_match:
+                                mint_amount = ldu64_match.group(1)
+                                break
+                        if mint_amount:
+                            break
+                
+                # 如果还没找到，从 constants 中查找最大的 u64 值
+                if not mint_amount:
+                    max_val = None
+                    max_len = 0
+                    for idx, val in constants.items():
+                        if isinstance(val, str) and val.isdigit():
+                            val_len = len(val)
+                            if val_len >= 15:
+                                mint_amount = val
+                                break
+                            elif val_len > max_len:
+                                max_val = val
+                                max_len = val_len
+                    if not mint_amount and max_val:
+                        mint_amount = max_val
+                
+                # 根据实际的 API 调用生成代码
+                if has_create_regulated_currency:
+                    init_code += f"        let (v0, v1) = coin::create_regulated_currency<{type_name}>(arg0, {decimals}, b\"{type_name}\", b\"\", b\"\", None, arg1);\n"
+                else:
+                    init_code += f"        let (v0, v1) = coin::create_currency<{type_name}>(arg0, {decimals}, b\"{type_name}\", b\"\", b\"\", None, arg1);\n"
+                
+                # 检查是否有 mint 调用
+                if has_mint_and_transfer and mint_amount:
+                    init_code += f"        coin::mint_and_transfer<{type_name}>(&mut v0, {mint_amount}, tx_context::sender(arg1), arg1);\n"
+                elif has_mint and mint_amount:
+                    init_code += f"        let coin = coin::mint<{type_name}>(&mut v0, {mint_amount}, arg1);\n"
+                    init_code += f"        transfer::public_transfer<Coin<{type_name}>>(coin, tx_context::sender(arg1));\n"
+                
+                # 检查是否有 transfer 调用
+                if 'transfer::public_transfer<TreasuryCap' in disassembled_code or 'transfer::public_transfer' in disassembled_code:
+                    init_code += f"        transfer::public_transfer<TreasuryCap<{type_name}>>(v0, @0x0);\n"
+                
+                if 'transfer::public_share_object<CoinMetadata' in disassembled_code:
+                    init_code += f"        transfer::public_share_object<CoinMetadata<{type_name}>>(v1);\n"
+                
+                # 检查是否有其他 setup 调用（如 setup::setup）
+                if 'setup::setup' in disassembled_code:
+                    init_code += f"        setup::setup<{type_name}>(v0, v1, arg1);\n"
+                
+                # 检查是否有 treasury::share 调用
+                if 'treasury::share' in disassembled_code:
+                    init_code += f"        treasury::share<{type_name}>(v0);\n"
+                    
+        elif has_new_currency:
             decimals = constants.get('1', '9')
-            symbol = constants.get('2', '"LINEUP"')
-            name = constants.get('3', '"Lineup Token"')
+            symbol = constants.get('2', f'"{type_name}"')
+            name = constants.get('3', f'"{type_name} Token"')
             description = constants.get('4', '""')
             icon_url = constants.get('5', '""')
             
-            init_code += f"        let (v0, v1) = coin_registry::new_currency_with_otw<LINEUP>(\n"
+            init_code += f"        let (v0, v1) = coin_registry::new_currency_with_otw<{type_name}>(\n"
             init_code += f"            arg0, {decimals}, {symbol}, {name}, {description}, {icon_url}, arg1\n"
             init_code += f"        );\n"
-        
-        if 'make_supply_fixed_init' in disassembled_code:
-            init_code += f"        coin_registry::make_supply_fixed_init<LINEUP>(&mut v0, v1);\n"
-        
-        if 'coin::mint' in disassembled_code:
-            mint_amount = constants.get('0', '1000000000000000000')
-            init_code += f"        let coin = coin::mint<LINEUP>(&mut v1, {mint_amount}, arg1);\n"
-        
-        if 'finalize' in disassembled_code:
-            init_code += f"        let metadata_cap = coin_registry::finalize<LINEUP>(v0, arg1);\n"
-        
-        if 'transfer::public_transfer' in disassembled_code:
-            init_code += f"        transfer::public_transfer(metadata_cap, tx_context::sender(arg1));\n"
-            init_code += f"        transfer::public_transfer(coin, tx_context::sender(arg1));\n"
+            
+            if 'make_supply_fixed_init' in disassembled_code:
+                init_code += f"        coin_registry::make_supply_fixed_init<{type_name}>(&mut v0, v1);\n"
+            
+            if 'coin::mint' in disassembled_code:
+                mint_amount = constants.get('0', '1000000000000000000')
+                init_code += f"        let coin = coin::mint<{type_name}>(&mut v1, {mint_amount}, arg1);\n"
+                if 'transfer::public_transfer' in disassembled_code:
+                    init_code += f"        transfer::public_transfer<Coin<{type_name}>>(coin, tx_context::sender(arg1));\n"
+            
+            if 'finalize' in disassembled_code:
+                init_code += f"        let metadata_cap = coin_registry::finalize<{type_name}>(v0, arg1);\n"
+                if 'transfer::public_transfer' in disassembled_code:
+                    init_code += f"        transfer::public_transfer(metadata_cap, tx_context::sender(arg1));\n"
+        else:
+            # 如果都没有找到，说明代码可能不完整或使用了其他模式
+            init_code += "        // 代码不完整，无法准确提取 init 函数内容\n"
         
         init_code += "    }\n"
     
@@ -570,7 +707,7 @@ def get_sui_move_code(token_address: str) -> Optional[Dict[str, Any]]:
         object_response = None
         object_result = object_result
         
-        disassembled_source = None
+        disassembled_modules = {}  # 改为字典，为每个模块分别处理
         if "result" in object_result:
             data = object_result["result"].get("data", {})
             if "content" in data and "disassembled" in data["content"]:
@@ -580,38 +717,57 @@ def get_sui_move_code(token_address: str) -> Optional[Dict[str, Any]]:
                 # 2. 包含 "modules" 字段的字典
                 if isinstance(disassembled, dict):
                     # 情况1: 直接以模块名为键
-                    source_parts = []
-                    for key, value in disassembled.items():
-                        if isinstance(value, str) and len(value) > 100:
+                    for module_name, value in disassembled.items():
+                        module_source = None
+                        # 优先检查是否是字典，包含 source 字段
+                        if isinstance(value, dict) and "source" in value:
+                            source_code = value["source"]
+                            if isinstance(source_code, str) and len(source_code) > 100:
+                                module_source = source_code
+                        elif isinstance(value, str) and len(value) > 100:
                             if 'module' in value.lower() or 'fun' in value.lower() or 'struct' in value.lower() or 'init' in value.lower():
-                                source_parts.append(value)
+                                module_source = value
+                        
+                        if module_source:
+                            # 检查是否是反编译代码（需要转换）还是源代码（直接使用）
+                            if 'Call ' in module_source or 'LdConst' in module_source or '// Move bytecode' in module_source:
+                                # 这是反编译代码，需要转换
+                                readable = convert_disassembled_to_readable_source(module_source, package_address)
+                                if readable:
+                                    disassembled_modules[module_name] = readable
+                            else:
+                                # 这已经是源代码，直接使用
+                                disassembled_modules[module_name] = module_source
                     
                     # 情况2: 包含 modules 字段
-                    if not source_parts and "modules" in disassembled:
+                    if not disassembled_modules and "modules" in disassembled:
                         modules = disassembled["modules"]
                         if isinstance(modules, dict):
                             for module_name, module_data in modules.items():
-                                if isinstance(module_data, str) and len(module_data) > 100:
-                                    source_parts.append(module_data)
+                                module_source = None
+                                # 优先检查 source 字段
+                                if isinstance(module_data, dict) and "source" in module_data:
+                                    source_code = module_data["source"]
+                                    if isinstance(source_code, str) and len(source_code) > 100:
+                                        module_source = source_code
+                                elif isinstance(module_data, str) and len(module_data) > 100:
+                                    module_source = module_data
                                 elif isinstance(module_data, dict):
                                     # 查找源代码字段
                                     for k, v in module_data.items():
                                         if isinstance(v, str) and len(v) > 100:
                                             if 'module' in v.lower() or 'fun' in v.lower() or 'struct' in v.lower():
-                                                source_parts.append(v)
-                    
-                    if source_parts:
-                        # 将反编译代码转换为可读格式
-                        readable_sources = []
-                        for source in source_parts:
-                            readable = convert_disassembled_to_readable_source(source, package_address)
-                            if readable:
-                                readable_sources.append(readable)
-                        if readable_sources:
-                            disassembled_source = "\n\n".join(readable_sources)
-                        else:
-                            # 如果转换失败，使用原始代码
-                            disassembled_source = "\n\n".join(source_parts)
+                                                module_source = v
+                                                break
+                                
+                                if module_source:
+                                    # 检查是否需要转换
+                                    if 'Call ' in module_source or 'LdConst' in module_source or '// Move bytecode' in module_source:
+                                        readable = convert_disassembled_to_readable_source(module_source, package_address)
+                                        if readable:
+                                            disassembled_modules[module_name] = readable
+                                    else:
+                                        disassembled_modules[module_name] = module_source
         
         # 处理 normalized 结果（作为备选）
         modules = None
@@ -635,17 +791,9 @@ def get_sui_move_code(token_address: str) -> Optional[Dict[str, Any]]:
                 pass
         
         # 如果 disassembled 成功，直接使用它（最快）
-        if disassembled_source:
-            if modules:
-                # 使用模块名作为键
-                move_source_code = {}
-                for module_name in modules.keys():
-                    move_source_code[module_name] = disassembled_source
-                source_method = "rpc_disassembled"
-            else:
-                # 如果没有模块信息，创建一个默认的
-                move_source_code = {"lineup": disassembled_source}
-                source_method = "rpc_disassembled"
+        if disassembled_modules:
+            move_source_code = disassembled_modules
+            source_method = "rpc_disassembled"
         elif modules:
             # 如果没有 disassembled，使用 normalized 转换
             move_source_code = {}

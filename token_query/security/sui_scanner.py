@@ -7,13 +7,14 @@ from typing import Dict, Any, List, Optional
 import re
 
 
-def scan_sui_move_code(source_code: Dict[str, str], package_address: str) -> Dict[str, Any]:
+def scan_sui_move_code(source_code: Dict[str, str], package_address: str, token_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     扫描 Sui Move 代码，查找常见的安全问题
     
     参数:
         source_code: 模块名 -> Move 源代码的字典
         package_address: Package 地址
+        token_info: 代币信息（可选，包含 decimals 等）
     
     返回:
         包含扫描结果的字典
@@ -30,7 +31,7 @@ def scan_sui_move_code(source_code: Dict[str, str], package_address: str) -> Dic
         all_issues.extend(_check_access_control(lines, module_name))
         
         # 3. 检查可增发代币
-        all_issues.extend(_check_mintable(lines, module_name))
+        all_issues.extend(_check_mintable(lines, module_name, token_info=token_info))
         
         # 4. 检查暂停功能
         all_issues.extend(_check_pause_function(lines, module_name))
@@ -68,27 +69,27 @@ def scan_sui_move_code(source_code: Dict[str, str], package_address: str) -> Dic
         # 15. 检查函数可见性
         all_issues.extend(_check_function_visibility(lines, module_name))
     
-    # 按严重程度分类
+    # 按严重程度分类（排除 LOW 级别）
     critical = [i for i in all_issues if i.get('severity') == 'CRITICAL']
     high = [i for i in all_issues if i.get('severity') == 'HIGH']
     medium = [i for i in all_issues if i.get('severity') == 'MEDIUM']
-    low = [i for i in all_issues if i.get('severity') == 'LOW']
+    low = [i for i in all_issues if i.get('severity') == 'LOW']  # 保留用于统计，但不包含在返回结果中
     info = [i for i in all_issues if i.get('severity') == 'INFO']
     
     return {
         "package_address": package_address,
-        "issues": critical + high + medium + low,
+        "issues": critical + high + medium + info,  # 排除 low 级别，但包含 info 级别（特别是 Mint功能分析）
         "critical": critical,
         "high": high,
         "medium": medium,
-        "low": low,
+        "low": [],  # 返回空列表
         "info": info,
         "summary": {
-            "total_issues": len(all_issues),
+            "total_issues": len(critical + high + medium + info),  # 不包含 low
             "critical": len(critical),
             "high": len(high),
             "medium": len(medium),
-            "low": len(low),
+            "low": 0,  # 显示为 0
             "info": len(info)
         }
     }
@@ -249,7 +250,7 @@ def _check_transfer_functions(lines: List[str], module_name: str) -> List[Dict[s
     return issues
 
 
-def _check_mintable(lines: List[str], module_name: str) -> List[Dict[str, Any]]:
+def _check_mintable(lines: List[str], module_name: str, token_info: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """检查是否可增发，并分析mint形式、最大值限制等，提取代码片段"""
     issues = []
     mint_info = {
@@ -258,13 +259,15 @@ def _check_mintable(lines: List[str], module_name: str) -> List[Dict[str, Any]]:
         "mint_function_exists": False,
         "has_max_supply": False,
         "max_supply_value": None,
+        "decimals": None,  # 小数位数
         "mint_function_line": None,
         "init_mint_line": None,
         "mint_access_control": False,
         "fixed_supply": False,
         "mint_code_snippet": None,
         "init_mint_code_snippet": None,
-        "max_supply_code_snippet": None
+        "max_supply_code_snippet": None,
+        "code_incomplete": False  # 标记代码是否不完整
     }
     
     in_init = False
@@ -295,15 +298,73 @@ def _check_mintable(lines: List[str], module_name: str) -> List[Dict[str, Any]]:
         
         # 在init函数中查找mint相关操作
         if in_init:
+            # 查找小数位数（通常在 new_currency 调用中，第二个参数）
+            # 注意：new_currency 调用可能跨多行，需要合并上下文
+            if 'new_currency' in stripped.lower():
+                # 合并当前行和后续几行（处理跨行调用）
+                # i 是 1-based，lines 是 0-based，所以 lines[i-1] 是当前行
+                context_lines = [stripped]
+                for j in range(i, min(len(lines) + 1, i + 3)):  # i+3 是 1-based，所以需要 +1
+                    if j <= len(lines):  # j 是 1-based
+                        context_lines.append(lines[j-1].strip())  # lines[j-1] 是 0-based
+                context = ' '.join(context_lines)
+                
+                # 匹配 new_currency_with_otw<...>(arg0, 9, ...) 或 new_currency<...>(..., 9, ...)
+                # 查找第一个数字参数（通常是小数位数）
+                # 先尝试匹配 new_currency_with_otw
+                decimals_match = re.search(r'new_currency_with_otw[^,]*,\s*(\d+)', context)
+                if not decimals_match:
+                    # 再尝试匹配 new_currency
+                    decimals_match = re.search(r'new_currency[^,]*,\s*(\d+)', context)
+                if decimals_match:
+                    mint_info["decimals"] = int(decimals_match.group(1))
+            
+            # 如果从代码中提取不到小数位，尝试从 token_info 获取
+            if mint_info.get("decimals") is None and token_info:
+                decimals_from_info = token_info.get("decimals")
+                if decimals_from_info is not None:
+                    mint_info["decimals"] = int(decimals_from_info)
+            
             if 'mint' in stripped.lower() or 'MintCap' in stripped or 'TreasuryCap' in stripped:
                 mint_info["has_mint"] = True
                 mint_info["mint_in_init"] = True
                 mint_info["init_mint_line"] = i
+                # 尝试从 mint 调用中提取数量（作为最大供应量）
+                # 匹配 coin::mint<...>(..., 数量, ...) 或 coin::mint_and_transfer<...>(..., 数量, ...)
+                mint_amount_match = re.search(r'::mint[^,]*,\s*(\d+)', stripped)
+                if mint_amount_match:
+                    mint_amount = mint_amount_match.group(1)
+                    mint_amount_int = int(mint_amount)
+                    # 检查代码是否完整：如果 mint 数量很小（< 1000）且没有 new_currency 调用，
+                    # 可能是代码不完整或提取错误，需要更谨慎
+                    # 但如果已经有 new_currency 调用（说明代码相对完整），或者数量很大，可以信任
+                    if mint_info.get("decimals") is not None or mint_amount_int >= 1000:
+                        # 代码看起来完整，可以信任这个值
+                        if not mint_info["max_supply_value"] or mint_info.get("fixed_supply"):
+                            mint_info["max_supply_value"] = mint_amount
+                            mint_info["has_max_supply"] = True
+                    elif mint_amount_int < 1000:
+                        # 数量很小，可能是代码不完整或提取错误
+                        # 只在没有其他最大供应量信息时才使用，并标记为可能不准确
+                        if not mint_info["max_supply_value"]:
+                            mint_info["max_supply_value"] = mint_amount
+                            mint_info["has_max_supply"] = True
+                            mint_info["max_supply_maybe_incomplete"] = True  # 标记可能不完整
             # 检查是否是固定供应量（make_supply_fixed_init）
             if 'make_supply_fixed' in stripped.lower() or 'make_supply_fixed_init' in stripped.lower():
                 mint_info["fixed_supply"] = True
                 # 固定供应量的代币，init中的mint是安全的（只能调用一次）
                 mint_info["mint_access_control"] = True
+                # 如果还没有设置最大供应量，尝试从后续的 mint 行中提取
+                if not mint_info["max_supply_value"]:
+                    # 查找后续几行中的 mint 调用
+                    for j in range(i, min(len(lines), i + 5)):
+                        mint_line = lines[j].strip()
+                        mint_amount_match = re.search(r'::mint[^,]*,\s*(\d+)', mint_line)
+                        if mint_amount_match:
+                            mint_info["max_supply_value"] = mint_amount_match.group(1)
+                            mint_info["has_max_supply"] = True
+                            break
             if stripped == '}' or (stripped.endswith('}') and '{' not in stripped):
                 in_init = False
                 if mint_info["mint_in_init"]:
@@ -333,11 +394,14 @@ def _check_mintable(lines: List[str], module_name: str) -> List[Dict[str, Any]]:
                         mint_info["mint_access_control"] = True
                         break
         
-        # 查找最大供应量限制
-        if re.search(r'(maxSupply|max_supply|MAX_SUPPLY|cap|CAP|total_supply)', stripped, re.IGNORECASE):
+        # 查找最大供应量限制（避免匹配变量名中的 cap，如 metadata_cap）
+        # 只匹配独立的关键词或作为函数/变量名的一部分（但不是变量名的一部分）
+        max_supply_pattern = r'\b(maxSupply|max_supply|MAX_SUPPLY|total_supply)\b'
+        if re.search(max_supply_pattern, stripped, re.IGNORECASE):
             mint_info["has_max_supply"] = True
-            # 尝试提取数值
-            num_match = re.search(r'(\d+)', stripped)
+            # 尝试提取数值（在关键词附近查找）
+            # 匹配 = 数字 或 : 数字 或 (数字) 等模式
+            num_match = re.search(r'[=:(\s]+(\d+)\b', stripped)
             if num_match:
                 mint_info["max_supply_value"] = num_match.group(1)
             # 提取最大供应量相关代码（前后各3行）
@@ -357,6 +421,20 @@ def _check_mintable(lines: List[str], module_name: str) -> List[Dict[str, Any]]:
     if not mint_info["has_mint"]:
         return issues
     
+    # 检查代码是否完整：如果 init 函数中使用了未定义的变量，说明代码可能不完整
+    if mint_info["init_mint_code_snippet"]:
+        init_code = mint_info["init_mint_code_snippet"]
+        # 检查是否有明显的未定义变量（如 v1, metadata_cap 等被使用但未定义）
+        # 如果 mint 调用中使用了 &mut v1 但代码中没有 let (v0, v1) = new_currency 这样的定义
+        if '&mut v1' in init_code or '&mut v0' in init_code:
+            if 'new_currency' not in init_code.lower():
+                mint_info["code_incomplete"] = True
+        if 'metadata_cap' in init_code:
+            if 'metadata_cap' not in init_code.split('metadata_cap')[0] or 'let' not in init_code.split('metadata_cap')[0]:
+                # metadata_cap 被使用但可能未定义
+                if 'new_currency' not in init_code.lower() and 'finalize' not in init_code.lower():
+                    mint_info["code_incomplete"] = True
+    
     # 构建分析结果
     mint_type = "未知"
     if mint_info["mint_in_init"] and not mint_info["mint_function_exists"]:
@@ -367,9 +445,55 @@ def _check_mintable(lines: List[str], module_name: str) -> List[Dict[str, Any]]:
         mint_type = "运行态可铸造"
     
     max_supply_info = "无限制"
+    incomplete_warning = ""  # 初始化警告变量
     if mint_info["has_max_supply"]:
-        if mint_info["max_supply_value"]:
-            max_supply_info = f"有最大值限制: {mint_info['max_supply_value']}"
+        # 如果代码不完整，不显示可能错误的最大供应量
+        if mint_info.get("code_incomplete") and mint_info.get("max_supply_maybe_incomplete"):
+            max_supply_info = "无法确定（代码不完整，无法准确提取最大供应量）"
+        elif mint_info["max_supply_value"]:
+            # 如果标记为可能不完整，添加警告
+            if mint_info.get("max_supply_maybe_incomplete"):
+                incomplete_warning = "（注意：代码可能不完整，此值可能不准确）"
+            # 格式化大数字，使其更易读
+            try:
+                max_supply_num = int(mint_info["max_supply_value"])
+                # 格式化原始数量
+                if max_supply_num >= 1e18:
+                    # 对于非常大的数字，使用科学计数法
+                    formatted_raw = f"{max_supply_num / 1e18:.0f}e18" if max_supply_num % 1e18 == 0 else f"{max_supply_num:,}"
+                elif max_supply_num >= 1000:
+                    # 使用千位分隔符
+                    formatted_raw = f"{max_supply_num:,}"
+                else:
+                    formatted_raw = str(max_supply_num)
+                
+                # 如果知道小数位数，计算实际代币数量
+                if mint_info.get("decimals") is not None:
+                    decimals = mint_info["decimals"]
+                    actual_tokens = max_supply_num / (10 ** decimals)
+                    # 格式化实际代币数量
+                    # 注意：1亿 = 100,000,000 = 1e8，10亿 = 1,000,000,000 = 1e9
+                    if actual_tokens >= 1e8:  # 1亿以上
+                        yi = actual_tokens / 1e8  # 转换为"亿"单位
+                        if abs(yi - int(yi)) < 0.01:  # 允许小的浮点误差
+                            formatted_actual = f"{int(yi)}亿"
+                        else:
+                            formatted_actual = f"{actual_tokens:,.0f}"
+                    elif actual_tokens >= 1e6:  # 100万以上
+                        millions = actual_tokens / 1e6
+                        if abs(millions - int(millions)) < 0.01:
+                            formatted_actual = f"{int(millions)}百万"
+                        else:
+                            formatted_actual = f"{actual_tokens:,.0f}"
+                    elif actual_tokens >= 1000:
+                        formatted_actual = f"{actual_tokens:,.0f}"
+                    else:
+                        formatted_actual = f"{actual_tokens:.0f}"
+                    max_supply_info = f"有最大值限制: {formatted_actual} 代币 (原始值: {formatted_raw}, 小数位: {decimals}){incomplete_warning}"
+                else:
+                    max_supply_info = f"有最大值限制: {formatted_raw} (原始值){incomplete_warning}"
+            except (ValueError, TypeError):
+                max_supply_info = f"有最大值限制: {mint_info['max_supply_value']}{incomplete_warning}"
         else:
             max_supply_info = "有最大值限制（具体值需查看代码）"
     
@@ -417,6 +541,7 @@ def _check_mintable(lines: List[str], module_name: str) -> List[Dict[str, Any]]:
             "has_max_supply": mint_info["has_max_supply"],
             "mint_in_init": mint_info["mint_in_init"],
             "mint_function_exists": mint_info["mint_function_exists"],
+            "decimals": mint_info.get("decimals"),
             "mint_code_snippet": mint_info["mint_code_snippet"],
             "init_mint_code_snippet": mint_info["init_mint_code_snippet"],
             "max_supply_code_snippet": mint_info["max_supply_code_snippet"]
@@ -765,7 +890,6 @@ def format_sui_scan_results(results: Dict[str, Any]) -> str:
     output_lines.append(f"║  严重 (CRITICAL): {summary.get('critical', 0)}")
     output_lines.append(f"║  高危 (HIGH): {summary.get('high', 0)}")
     output_lines.append(f"║  中危 (MEDIUM): {summary.get('medium', 0)}")
-    output_lines.append(f"║  低危 (LOW): {summary.get('low', 0)}")
     output_lines.append(f"║  信息 (INFO): {summary.get('info', 0)}")
     output_lines.append("╚══════════════════════════════════════════════════════════════════════════════╝")
     output_lines.append("")
@@ -795,8 +919,8 @@ def format_sui_scan_results(results: Dict[str, Any]) -> str:
     output_lines.append("─" * 80)
     output_lines.append("")
     
-    # 按严重程度排序显示（排除mint分析，因为已经单独显示）
-    all_issues = [i for i in (critical + high + medium + low + info) if i.get('title') != 'Mint功能分析']
+    # 按严重程度排序显示（排除mint分析和low级别，因为已经单独显示/过滤）
+    all_issues = [i for i in (critical + high + medium + info) if i.get('title') != 'Mint功能分析']
     
     for idx, issue in enumerate(all_issues, 1):
         severity = issue.get('severity', 'UNKNOWN')

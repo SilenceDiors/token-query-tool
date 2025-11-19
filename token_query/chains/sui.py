@@ -182,8 +182,31 @@ def query_sui_token(token_address: str) -> Optional[Dict[str, Any]]:
             supply_result = supply_response.json() if supply_response.status_code == 200 else None
             
             total_supply = None
-            if supply_result and "result" in supply_result:
-                total_supply = supply_result["result"].get("value")
+            if supply_result:
+                if "result" in supply_result:
+                    # 成功获取
+                    result = supply_result["result"]
+                    if isinstance(result, dict):
+                        total_supply = result.get("value")
+                    elif isinstance(result, str):
+                        # 有些 RPC 可能直接返回字符串
+                        try:
+                            total_supply = int(result)
+                        except (ValueError, TypeError):
+                            pass
+                    elif isinstance(result, (int, str)):
+                        # 直接是数字或字符串
+                        try:
+                            total_supply = int(result) if isinstance(result, str) else result
+                        except (ValueError, TypeError):
+                            pass
+                elif "error" in supply_result:
+                    # RPC 返回错误，可能是 regulated currency 或其他机制
+                    # 尝试使用其他方法获取供应量（如果需要的话）
+                    error_msg = supply_result["error"].get("message", "")
+                    # 对于 regulated currency，TreasuryCap 可能不存在，这是正常的
+                    # 我们仍然返回其他信息，只是 totalSupply 为 None
+                    pass
             
             return {
                 "name": metadata.get("name", "N/A"),

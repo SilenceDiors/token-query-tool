@@ -180,18 +180,69 @@ def format_goplus_results(security_info: Dict[str, Any]) -> str:
     output_lines.append("╠" + "═" * 78 + "╣")
     
     # 基本信息
-    token_name = security_info.get("token_name", "N/A")
+    token_name = security_info.get("token_name") or security_info.get("name", "N/A")
     if token_name and token_name != "N/A":
         output_lines.append("║" + f"  代币名称: {token_name}".ljust(79) + "║")
+    
+    symbol = security_info.get("symbol")
+    if symbol:
+        output_lines.append("║" + f"  代币符号: {symbol}".ljust(79) + "║")
+    
+    decimals = security_info.get("decimals")
+    if decimals is not None:
+        output_lines.append("║" + f"  小数位数: {decimals}".ljust(79) + "║")
+    
+    creator = security_info.get("creator")
+    if creator:
+        output_lines.append("║" + f"  创建者: {creator[:20]}...{creator[-10:]}".ljust(79) + "║")
     
     # 安全风险检测（处理字符串 "0"/"1" 格式）
     is_open_source = _parse_bool(security_info.get("is_open_source"))
     is_proxy = _parse_bool(security_info.get("is_proxy"))
-    is_mintable = _parse_bool(security_info.get("is_mintable"))
-    is_blacklisted = _parse_bool(security_info.get("is_blacklisted"))
+    
+    # 处理 Sui 链的特殊格式（mintable, blacklist 等可能是字典）
+    is_mintable = None
+    if "is_mintable" in security_info:
+        is_mintable = _parse_bool(security_info.get("is_mintable"))
+    elif "mintable" in security_info:
+        mintable_info = security_info.get("mintable")
+        if isinstance(mintable_info, dict):
+            is_mintable = _parse_bool(mintable_info.get("value"))
+        else:
+            is_mintable = _parse_bool(mintable_info)
+    
+    is_blacklisted = None
+    if "is_blacklisted" in security_info:
+        is_blacklisted = _parse_bool(security_info.get("is_blacklisted"))
+    elif "blacklist" in security_info:
+        blacklist_info = security_info.get("blacklist")
+        if isinstance(blacklist_info, dict):
+            is_blacklisted = _parse_bool(blacklist_info.get("value"))
+        else:
+            is_blacklisted = _parse_bool(blacklist_info)
+    
     is_honeypot = _parse_bool(security_info.get("is_honeypot"))
     is_anti_whale = _parse_bool(security_info.get("is_anti_whale"))
     is_whitelisted = _parse_bool(security_info.get("is_whitelisted"))
+    
+    # Sui 链特有字段
+    contract_upgradeable = None
+    if "contract_upgradeable" in security_info:
+        upgradeable_info = security_info.get("contract_upgradeable")
+        if isinstance(upgradeable_info, dict):
+            contract_upgradeable = _parse_bool(upgradeable_info.get("value"))
+        else:
+            contract_upgradeable = _parse_bool(upgradeable_info)
+    
+    metadata_modifiable = None
+    if "metadata_modifiable" in security_info:
+        metadata_info = security_info.get("metadata_modifiable")
+        if isinstance(metadata_info, dict):
+            metadata_modifiable = _parse_bool(metadata_info.get("value"))
+        else:
+            metadata_modifiable = _parse_bool(metadata_info)
+    
+    trusted_token = _parse_bool(security_info.get("trusted_token"))
     
     # 交易税费（处理字符串格式）
     buy_tax = _parse_float(security_info.get("buy_tax"))
@@ -246,6 +297,51 @@ def format_goplus_results(security_info: Dict[str, Any]) -> str:
         output_lines.append("║" + f"  白名单功能: {status}".ljust(79) + "║")
         if is_whitelisted:
             risk_items.append("存在白名单功能，可能限制交易")
+    
+    # Sui 链特有字段
+    if contract_upgradeable is not None:
+        status = "是" if contract_upgradeable else "否"
+        output_lines.append("║" + f"  合约可升级: {status}".ljust(79) + "║")
+        if contract_upgradeable:
+            risk_items.append("合约可升级，可能存在升级风险")
+            # 显示升级权限拥有者
+            upgradeable_info = security_info.get("contract_upgradeable", {})
+            if isinstance(upgradeable_info, dict):
+                cap_owner = upgradeable_info.get("cap_owner")
+                if cap_owner and cap_owner != "0x0000000000000000000000000000000000000000000000000000000000000000":
+                    output_lines.append("║" + f"    升级权限拥有者: {cap_owner[:20]}...{cap_owner[-10:]}".ljust(79) + "║")
+    
+    if metadata_modifiable is not None:
+        status = "是" if metadata_modifiable else "否"
+        output_lines.append("║" + f"  元数据可修改: {status}".ljust(79) + "║")
+        if metadata_modifiable:
+            risk_items.append("元数据可修改，代币信息可能被更改")
+            # 显示元数据修改权限拥有者
+            metadata_info = security_info.get("metadata_modifiable", {})
+            if isinstance(metadata_info, dict):
+                cap_owner = metadata_info.get("cap_owner")
+                if cap_owner and cap_owner != "0x0000000000000000000000000000000000000000000000000000000000000000":
+                    output_lines.append("║" + f"    元数据权限拥有者: {cap_owner[:20]}...{cap_owner[-10:]}".ljust(79) + "║")
+    
+    if trusted_token is not None:
+        status = "是" if trusted_token else "否"
+        output_lines.append("║" + f"  可信代币: {status}".ljust(79) + "║")
+    
+    # 显示黑名单权限拥有者（如果是 Sui 链格式）
+    if is_blacklisted is not None and "blacklist" in security_info:
+        blacklist_info = security_info.get("blacklist", {})
+        if isinstance(blacklist_info, dict):
+            cap_owner = blacklist_info.get("cap_owner")
+            if cap_owner and cap_owner != "0x0000000000000000000000000000000000000000000000000000000000000000":
+                output_lines.append("║" + f"  黑名单权限拥有者: {cap_owner[:20]}...{cap_owner[-10:]}".ljust(79) + "║")
+    
+    # 显示 mint 权限拥有者（如果是 Sui 链格式）
+    if is_mintable is not None and "mintable" in security_info:
+        mintable_info = security_info.get("mintable", {})
+        if isinstance(mintable_info, dict):
+            cap_owner = mintable_info.get("cap_owner")
+            if cap_owner and cap_owner != "0x0000000000000000000000000000000000000000000000000000000000000000":
+                output_lines.append("║" + f"  Mint权限拥有者: {cap_owner[:20]}...{cap_owner[-10:]}".ljust(79) + "║")
     
     # 交易税费
     if buy_tax is not None or sell_tax is not None:
@@ -320,7 +416,15 @@ def format_goplus_results(security_info: Dict[str, Any]) -> str:
             percent = holder.get("percent", 0)
             balance = holder.get("balance", 0)
             is_contract = holder.get("is_contract", 0)
-            contract_tag = " (合约)" if is_contract else ""
+            tag = holder.get("tag")  # Sui 链可能有 tag 字段
+            
+            # 构建标签
+            tags = []
+            if is_contract:
+                tags.append("合约")
+            if tag:
+                tags.append(tag)
+            tag_str = f" ({', '.join(tags)})" if tags else ""
             
             # 格式化百分比
             if isinstance(percent, str):
@@ -329,13 +433,17 @@ def format_goplus_results(security_info: Dict[str, Any]) -> str:
                 except:
                     percent = 0
             
-            output_lines.append(f"  {i}. {address[:10]}...{address[-8:]}{contract_tag}")
+            output_lines.append(f"  {i}. {address[:10]}...{address[-8:]}{tag_str}")
             # 格式化余额
             try:
                 # 尝试转换为数字并格式化
                 balance_num = _parse_int(balance) or _parse_float(balance)
                 if balance_num is not None:
-                    balance_str = f"{int(balance_num):,}"
+                    # 如果是浮点数，显示小数位
+                    if isinstance(balance, str) and '.' in balance:
+                        balance_str = f"{float(balance):,.2f}"
+                    else:
+                        balance_str = f"{int(balance_num):,}"
                 else:
                     balance_str = str(balance)
             except (ValueError, TypeError):
@@ -367,11 +475,12 @@ def format_goplus_results(security_info: Dict[str, Any]) -> str:
 def _analyze_mint_from_goplus(security_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     从GoPlus API数据中分析mint功能
-    对于无法读取源代码的链（如Solana），使用GoPlus API数据推断
+    对于无法读取源代码的链（如Solana、Sui），使用GoPlus API数据推断
     """
     # 处理不同链的格式差异
     # EVM链使用 is_mintable 字段（字符串 "0"/"1"）
     # Solana使用 mintable 字段（对象，包含 status 和 authority）
+    # Sui使用 mintable 字段（对象，包含 value 和 cap_owner）
     is_mintable = None
     access_control_info = "无法确定（需要查看源代码）"  # 默认值
     
@@ -379,23 +488,38 @@ def _analyze_mint_from_goplus(security_info: Dict[str, Any]) -> Optional[Dict[st
         # EVM链格式
         is_mintable = _parse_bool(security_info.get("is_mintable"))
     elif "mintable" in security_info:
-        # Solana格式
+        # Solana/Sui格式
         mintable_info = security_info.get("mintable")
         if isinstance(mintable_info, dict):
-            # 从 status 字段判断
-            status = mintable_info.get("status")
-            is_mintable = _parse_bool(status)
-            
-            # 提取权限信息
-            authority = mintable_info.get("authority", [])
-            if authority and isinstance(authority, list) and len(authority) > 0:
-                authority_addresses = [auth.get("address", "") if isinstance(auth, dict) else str(auth) for auth in authority]
-                if authority_addresses:
-                    access_control_info = f"权限控制地址: {', '.join(authority_addresses)}"
-                else:
+            # Sui格式：包含 value 和 cap_owner
+            if "value" in mintable_info:
+                is_mintable = _parse_bool(mintable_info.get("value"))
+                # 提取权限拥有者
+                cap_owner = mintable_info.get("cap_owner", "")
+                if cap_owner and cap_owner != "0x0000000000000000000000000000000000000000000000000000000000000000":
+                    access_control_info = f"权限控制地址: {cap_owner}"
+                elif is_mintable:
                     access_control_info = "有权限控制（具体地址未知）"
+                else:
+                    access_control_info = "无权限控制（不可增发）"
+            # Solana格式：包含 status 和 authority
+            elif "status" in mintable_info:
+                status = mintable_info.get("status")
+                is_mintable = _parse_bool(status)
+                
+                # 提取权限信息
+                authority = mintable_info.get("authority", [])
+                if authority and isinstance(authority, list) and len(authority) > 0:
+                    authority_addresses = [auth.get("address", "") if isinstance(auth, dict) else str(auth) for auth in authority]
+                    if authority_addresses:
+                        access_control_info = f"权限控制地址: {', '.join(authority_addresses)}"
+                    else:
+                        access_control_info = "有权限控制（具体地址未知）"
+                else:
+                    access_control_info = "无权限控制（任何人都可以铸造）"
             else:
-                access_control_info = "无权限控制（任何人都可以铸造）"
+                # 其他格式，尝试直接解析
+                is_mintable = _parse_bool(mintable_info)
         else:
             # 如果不是字典，尝试直接解析
             is_mintable = _parse_bool(mintable_info)

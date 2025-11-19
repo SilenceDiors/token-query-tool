@@ -1999,12 +1999,15 @@ def format_slither_results(results: Dict[str, Any]) -> str:
         parsed_issues = _parse_slither_output(raw_output)
         
         if parsed_issues:
-            # 统计信息
-            total_issues = len(parsed_issues)
-            high_count = sum(1 for issue in parsed_issues if issue.get('severity') == 'HIGH')
-            medium_count = sum(1 for issue in parsed_issues if issue.get('severity') == 'MEDIUM')
-            low_count = sum(1 for issue in parsed_issues if issue.get('severity') == 'LOW')
-            info_count = sum(1 for issue in parsed_issues if issue.get('severity') == 'INFO' or not issue.get('severity'))
+            # 过滤掉 LOW 级别的漏洞
+            filtered_issues = [i for i in parsed_issues if i.get('severity') != 'LOW']
+            
+            # 统计信息（排除 LOW）
+            total_issues = len(filtered_issues)
+            high_count = sum(1 for issue in filtered_issues if issue.get('severity') == 'HIGH')
+            medium_count = sum(1 for issue in filtered_issues if issue.get('severity') == 'MEDIUM')
+            low_count = sum(1 for issue in filtered_issues if issue.get('severity') == 'LOW')  # 应该为 0
+            info_count = sum(1 for issue in filtered_issues if issue.get('severity') == 'INFO' or not issue.get('severity'))
             
             # 美化摘要
             output_lines.append("")
@@ -2017,21 +2020,20 @@ def format_slither_results(results: Dict[str, Any]) -> str:
                 output_lines.append("║" + f"  🔴 高危 (HIGH): {high_count:>3}".ljust(79) + "║")
             if medium_count > 0:
                 output_lines.append("║" + f"  🟠 中危 (MEDIUM): {medium_count:>3}".ljust(79) + "║")
-            if low_count > 0:
-                output_lines.append("║" + f"  🟡 低危 (LOW): {low_count:>3}".ljust(79) + "║")
+            # 不再显示 LOW 级别
             if info_count > 0:
                 output_lines.append("║" + f"  ℹ️  信息 (INFO): {info_count:>3}".ljust(79) + "║")
             
             output_lines.append("╚" + "═" * 78 + "╝")
             output_lines.append("")
             
-            # 详细问题列表
+            # 详细问题列表（只显示过滤后的）
             if total_issues > 0:
                 output_lines.append("📋 详细问题列表:")
                 output_lines.append("─" * 80)
                 output_lines.append("")
                 
-                for i, issue in enumerate(parsed_issues, 1):
+                for i, issue in enumerate(filtered_issues, 1):
                     severity = issue.get('severity', 'INFO')
                     check_name = issue.get('check', 'Unknown')
                     description = issue.get('description', '')

@@ -1444,29 +1444,31 @@ def format_pattern_scan_results(issues: List[Dict[str, Any]]) -> str:
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
     
-    # 按严重程度分类
+    # 按严重程度分类（排除 LOW 级别）
     critical = [i for i in issues if i.get('severity') == 'CRITICAL']
     high = [i for i in issues if i.get('severity') == 'HIGH']
     medium = [i for i in issues if i.get('severity') == 'MEDIUM']
-    low = [i for i in issues if i.get('severity') == 'LOW']
+    low = [i for i in issues if i.get('severity') == 'LOW']  # 保留用于统计，但不显示
+    
+    # 过滤掉 low 级别的漏洞
+    filtered_issues = [i for i in issues if i.get('severity') != 'LOW']
     
     output_lines = []
     output_lines.append("")
     output_lines.append("╔══════════════════════════════════════════════════════════════════════════════╗")
     output_lines.append("║              模式匹配安全扫描结果                                        ║")
     output_lines.append("╠══════════════════════════════════════════════════════════════════════════════╣")
-    output_lines.append(f"║  总问题数: {len(issues)}")
+    output_lines.append(f"║  总问题数: {len(filtered_issues)}")
     output_lines.append(f"║  严重 (CRITICAL): {len(critical)}")
     output_lines.append(f"║  高危 (HIGH): {len(high)}")
     output_lines.append(f"║  中危 (MEDIUM): {len(medium)}")
-    output_lines.append(f"║  低危 (LOW): {len(low)}")
     output_lines.append("╚══════════════════════════════════════════════════════════════════════════════╝")
     output_lines.append("")
     
     # 提取mint分析信息（如果有）
     mint_analysis = None
     other_issues = []
-    for issue in issues:
+    for issue in filtered_issues:
         if issue.get('title') == 'Mint功能分析':
             mint_analysis = issue
         else:
@@ -1488,8 +1490,8 @@ def format_pattern_scan_results(issues: List[Dict[str, Any]]) -> str:
     output_lines.append("─" * 80)
     output_lines.append("")
     
-    # 按严重程度排序显示（排除mint分析，因为已经单独显示）
-    all_issues = [i for i in (critical + high + medium + low) if i.get('title') != 'Mint功能分析']
+    # 按严重程度排序显示（排除mint分析和low级别，因为已经单独显示/过滤）
+    all_issues = [i for i in (critical + high + medium) if i.get('title') != 'Mint功能分析']
     
     for idx, issue in enumerate(all_issues, 1):
         severity = issue.get('severity', 'UNKNOWN')

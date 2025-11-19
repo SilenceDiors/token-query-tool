@@ -1,0 +1,146 @@
+[
+  {
+    "name": "UP",
+    "address": "0x87dfe1248a1dc4ce473bd9cb2937d66cdc6c30fee63f3fe0dbb55c7a09d35dec::up::UP",
+    "success": true,
+    "message": "成功",
+    "info": {
+      "has_mint_analysis": true,
+      "has_max_supply": true,
+      "has_access_control": true,
+      "code_incomplete": false,
+      "error": null,
+      "max_supply_text": "最大值限制: 有最大值限制: 100,000,000,000,000 (原始值)",
+      "access_control_text": "权限控制: init中mint（相对安全，init只能调用一次）"
+    }
+  },
+  {
+    "name": "LINEUP",
+    "address": "0x03cd711c02597eba9e20f04cb8eee214c23229605faaaa717eafbbbdee55ccfb::lineup::LINEUP",
+    "success": true,
+    "message": "成功",
+    "info": {
+      "has_mint_analysis": true,
+      "has_max_supply": true,
+      "has_access_control": true,
+      "code_incomplete": false,
+      "error": null,
+      "max_supply_text": "最大值限制: 有最大值限制: 10亿 代币 (原始值: 1e18, 小数位: 9)",
+      "access_control_text": "权限控制: 有权限控制（固定供应量，init中一次性铸造）"
+    }
+  },
+  {
+    "name": "ARTIS",
+    "address": "0xe03aa7dc69ba3f8d8876d24bd61b79f31bff3a82d18100bcae903b9fdf4058a2::artis::ARTIS",
+    "success": true,
+    "message": "成功",
+    "info": {
+      "has_mint_analysis": true,
+      "has_max_supply": true,
+      "has_access_control": true,
+      "code_incomplete": false,
+      "error": null,
+      "max_supply_text": "最大值限制: 有最大值限制: 1,000,000,000,000,000 (原始值)",
+      "access_control_text": "权限控制: init中mint（相对安全，init只能调用一次）"
+    }
+  },
+  {
+    "name": "LINEUP_Short",
+    "address": "0x03cd711c02597eba9e20f04cb8eee214c23229605faaaa717eafbbbdee55ccfb",
+    "success": true,
+    "message": "成功",
+    "info": {
+      "has_mint_analysis": true,
+      "has_max_supply": true,
+      "has_access_control": true,
+      "code_incomplete": false,
+      "error": null,
+      "max_supply_text": "最大值限制: 有最大值限制: 10亿 代币 (原始值: 1e18, 小数位: 9)",
+      "access_control_text": "权限控制: 有权限控制（固定供应量，init中一次性铸造）"
+    }
+  },
+  {
+    "name": "SUI_Native",
+    "address": "0x2::sui::SUI",
+    "success": false,
+    "message": "无法获取代码或分析失败",
+    "info": {
+      "has_mint_analysis": false,
+      "has_max_supply": false,
+      "has_access_control": false,
+      "code_incomplete": false,
+      "error": "无法获取代码或分析失败"
+    }
+  },
+  {
+    "name": "USDC",
+    "address": "0x5d4b302506645c37ff133b98c4b50a5ae14841659738d6d733d59d0d217a93b::coin::COIN",
+    "success": false,
+    "message": "无法获取代码或分析失败",
+    "info": {
+      "has_mint_analysis": false,
+      "has_max_supply": false,
+      "has_access_control": false,
+      "code_incomplete": false,
+      "error": "无法获取代码或分析失败"
+    }
+  },
+  {
+    "name": "MovexNFT",
+    "address": "0xaf8cd5edc19c4512f4259f0bee101a40df44f2fe20d89518df35b0c83071a8a::movexnft::MovexNFT",
+    "success": false,
+    "message": "无法获取代码或分析失败",
+    "info": {
+      "has_mint_analysis": false,
+      "has_max_supply": false,
+      "has_access_control": false,
+      "code_incomplete": false,
+      "error": "无法获取代码或分析失败"
+    }
+  },
+  {
+    "name": "UP_Repeat",
+    "address": "0x87dfe1248a1dc4ce473bd9cb2937d66cdc6c30fee63f3fe0dbb55c7a09d35dec::up::UP",
+    "success": true,
+    "message": "成功",
+    "info": {
+      "has_mint_analysis": true,
+      "has_max_supply": true,
+      "has_access_control": true,
+      "code_incomplete": false,
+      "error": null,
+      "max_supply_text": "最大值限制: 有最大值限制: 100,000,000,000,000 (原始值)",
+      "access_control_text": "权限控制: init中mint（相对安全，init只能调用一次）"
+    }
+  },
+  {
+    "name": "LINEUP_Repeat",
+    "address": "0x03cd711c02597eba9e20f04cb8eee214c23229605faaaa717eafbbbdee55ccfb::lineup::LINEUP",
+    "success": true,
+    "message": "成功",
+    "info": {
+      "has_mint_analysis": true,
+      "has_max_supply": true,
+      "has_access_control": true,
+      "code_incomplete": false,
+      "error": null,
+      "max_supply_text": "最大值限制: 有最大值限制: 10亿 代币 (原始值: 1e18, 小数位: 9)",
+      "access_control_text": "权限控制: 有权限控制（固定供应量，init中一次性铸造）"
+    }
+  },
+  {
+    "name": "ARTIS_Repeat",
+    "address": "0xe03aa7dc69ba3f8d8876d24bd61b79f31bff3a82d18100bcae903b9fdf4058a2::artis::ARTIS",
+    "success": true,
+    "message": "成功",
+    "info": {
+      "has_mint_analysis": true,
+      "has_max_supply": true,
+      "has_access_control": true,
+      "code_incomplete": false,
+      "error": null,
+      "max_supply_text": "最大值限制: 有最大值限制: 1,000,000,000,000,000 (原始值)",
+      "access_control_text": "权限控制: init中mint（相对安全，init只能调用一次）"
+    }
+  }
+]
